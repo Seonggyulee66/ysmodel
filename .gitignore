@@ -7,5 +7,4 @@ train/
 *.md
 *.txt
 setup.py
-logs/*
-!logs/.gitkeep
+logs/
