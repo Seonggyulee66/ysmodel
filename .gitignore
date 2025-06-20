@@ -1,0 +1,11 @@
+__pycache__/
+build/
+merge_image_result/
+*.egg-info/
+small_train/
+train/
+*.md
+*.txt
+setup.py
+logs/*
+!logs/.gitkeep
