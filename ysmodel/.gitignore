@@ -8,3 +8,4 @@ train/
 *.txt
 setup.py
 logs/
+!logs/.gitkeep
