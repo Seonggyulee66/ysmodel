@@ -7,4 +7,5 @@ train/
 *.md
 *.txt
 setup.py
-logs/
+opencood/logs/
+*.png
