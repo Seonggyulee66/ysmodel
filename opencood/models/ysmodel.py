@@ -770,12 +770,11 @@ def warp_and_paste_into_large_bev(canvas, bev_feat, dx, dy, dyaw, voxel_size=0.5
     valid = (x_canvas >= 0) & (x_canvas < W_big) & (y_canvas >= 0) & (y_canvas < H_big)
     x_canvas = x_canvas[valid]
     y_canvas = y_canvas[valid]
-    src_feat = bev_feat.view(C, -1)[:, valid]
+    src_feat = bev_feat.view(C, -1)[:, valid].to(canvas.dtype)
 
     # 누적 방식으로 canvas에 삽입
-    for i in range(x_canvas.shape[0]):
-        x, y = x_canvas[i].item(), y_canvas[i].item()
-        canvas[:,:, y, x] += src_feat[:, i]
+    for c in range(C):
+        canvas[0, c].index_put_((y_canvas, x_canvas), src_feat[c], accumulate=True)
 
     return canvas
 
@@ -803,12 +802,12 @@ def get_large_bev(data_aug_conf, encoded_bev, positions, H_big=400, W_big=400):
         each_agent_bev_feats = encoded_bev[i].squeeze(0)        ## each_agent_bev_feats shape :  (C, small_H, small_W)
 
         ## visualize the bev_feat
-        visualize_bev(encoded_bev,title=f'Before_{i}||{idx}',save=True)
+        # visualize_bev(encoded_bev,title=f'Before_{i}||{idx}',save=True)
 
         dx, dy, dyaw = get_relative_pose(ego_pose, positions[0][i])
         canvas = warp_and_paste_into_large_bev(canvas, each_agent_bev_feats, dx, dy, dyaw)
 
-    visualize_bev(canvas[0],title=f'Concated_{idx}',save=True)
+    # visualize_bev(canvas[0],title=f'Concated_{idx}',save=True)
     return canvas      ## canvas shape : (Batch, channel, large_H, large_W)
 
 
@@ -1244,10 +1243,10 @@ class Mini_cooper(nn.Module):
         # print("ENCODED BEV SHAPE OF MULTI_AGENTS", encoded_bev.shape)     ## (3, 1, 64, 200, 200)
 
         ##          64 channel Case (For Training)
-        # mapped_bev= get_large_bev(self.data_aug_conf, encoded_bev, positions)
+        mapped_bev= get_large_bev(self.data_aug_conf, encoded_bev, positions)
 
         ##          3 channel Case (Visualize Case)
-        mapped_bev= get_large_bev(self.data_aug_conf, vis_encoded_bev, positions)
+        # mapped_bev= get_large_bev(self.data_aug_conf, vis_encoded_bev, positions)
 
 
         # print("LARGE BEV:::: ", mapped_bev, mapped_bev.shape)
