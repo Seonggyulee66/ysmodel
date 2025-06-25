@@ -709,26 +709,6 @@ def Encoding(img_inputs, intrinsics, extrinsics, data_aug_conf, grid_conf, is_tr
                             torch.stack(all_post_trans).to(device),
                             extrinsics.to(device))
 
-
-# def visualize_bev(large_bev, name):
-#     #bev = large_bev[0]  # shape [64, 400, 400]
-#     bev_rgb = large_bev.detach().cpu().numpy()  # shape [400, 400]
-
-#     # Normalize for imshow
-#     #print("BEV MIN:", bev_gray.min(), "BEV MAX:", bev_gray.max())
-#     bev_rgb = (bev_rgb - bev_rgb.min()) / (bev_rgb.max() - bev_rgb.min())
-#     bev_rgb = np.transpose(bev_rgb, (1, 2, 0))  # shape [400, 400, 3]
-
-#     save_path = '/home/sglee6/ysmodel/opencood/models/concat_savefigs/large_bev_visualization_{}_{}.png'.format(
-#         datetime.now().strftime("%Y%m%d_%H%M%S"), name)
-   
-#     plt.imsave(save_path, bev_rgb)
-#     # plt.imshow(bev_rgb)
-#     # plt.title("BEV Feature Map")
-#     # plt.axis("off")
-#     # #plt.show()
-#     # plt.savefig(save_path)
-
 # 간단한 BEV 시각화 함수
 def visualize_bev(bev_feat, title='BEV', save=False):
     """
