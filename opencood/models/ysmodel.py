@@ -39,6 +39,15 @@ import matplotlib.patches as patches
 from matplotlib.patches import Ellipse
 from sklearn.decomposition import PCA
 
+#           In ysmodel
+## Input Images shape : (agent_nums, Batch, camera_nums, image_H, image_W, channel) || [3,1,4,512,512,3]
+## Input Intrinsic shape : (agent_nums, Batch, camera_nums, 3, 3)
+## Input Extrinsic shape : (agent_nums, Batch, camera_nums, 4, 4)
+## Input Position shape : (agent_nums, Batch, 6) || 6 -> (x,y,z ...)
+## visuualize_bev | bev_feat shape : (channel, small_H, small_W) || [64 or 2,200,200]
+## get_large_bev | envoded_bev shape : (agent_nums, Batch, Channel, small_H, small_W) || [3,1,64 or 3, 200, 200]
+## Canvas shape : (Batch, channel, large_H, large_W) || [1,64,400,400]
+
 BottleneckBlock = lambda x: Bottleneck(x, x//4)
 ###########################################################################
 ###################### ENCODER ############################################
@@ -720,21 +729,23 @@ def Encoding(img_inputs, intrinsics, extrinsics, data_aug_conf, grid_conf, is_tr
 #     # #plt.show()
 #     # plt.savefig(save_path)
 
-def visualize_bev(large_bev, name, threshold=0.05):
-    bev = large_bev.detach().cpu().numpy()  # shape [3, 400, 400] or [C, H, W]
-    
-    # BEV를 단일 채널로 압축 (예: 평균 또는 최대)
-    bev_gray = bev.max(axis=0)  # shape [400, 400]
-
-    # 정규화 후 threshold로 이진화
-    bev_gray = (bev_gray - bev_gray.min()) / (bev_gray.max() - bev_gray.min())
-    bev_binary = (bev_gray > threshold).astype(np.uint8)  # 0 또는 1 값만 유지
-
-    save_path = '/home/sglee6/ysmodel/opencood/models/concat_savefigs/binary_bev_{}_{}.png'.format(
-        datetime.now().strftime("%Y%m%d_%H%M%S"), name)
-
-    # 흑백으로 저장 (0: 검정, 1: 흰색)
-    plt.imsave(save_path, bev_binary, cmap='gray', vmin=0, vmax=1)
+# 간단한 BEV 시각화 함수
+def visualize_bev(bev_feat, title='BEV', save=False):
+    """
+    bev_feat : (C,H,W)
+    """
+    bev_img = bev_feat.mean(dim=0).detach().cpu().numpy()
+    bev_img = (bev_img - bev_img.min()) / (bev_img.max() - bev_img.min() + 1e-5)
+    plt.figure(figsize=(6,6))
+    plt.imshow(bev_img, cmap='gray', vmin=0, vmax=1)
+    plt.title(title)
+    plt.axis('off')
+    if save == True:
+        save_path = '/home/sglee6/ysmodel/opencood/models/concat_savefigs/binary_bev_{}_{}.png'.format(
+            datetime.now().strftime("%Y%m%d_%H%M%S"), title)
+        plt.savefig(save_path)
+    else:
+        plt.show()
 
 def get_relative_pose(ego_pose, agent_pose):
     dx = agent_pose[..., 0] - ego_pose[..., 0]
@@ -742,128 +753,83 @@ def get_relative_pose(ego_pose, agent_pose):
     dyaw = agent_pose[..., 4] - ego_pose[..., 4]
     return dx, dy, dyaw
 
-# def warp_bev_feat(bev_feat, dx, dy, dyaw, voxel_size=0.5, map_size=400):
-#     C, H, W = bev_feat.shape
-#     bev_feat = bev_feat.unsqueeze(0)
+def warp_and_paste_into_large_bev(canvas, bev_feat, dx, dy, dyaw, voxel_size=0.5):
 
-#     dx_pix = dx / voxel_size
-#     dy_pix = dy / voxel_size
-
-#     theta = torch.zeros((1, 2, 3), device=bev_feat.device)
-#     theta[:, 0, 0] =  torch.cos(dyaw)
-#     theta[:, 0, 1] = -torch.sin(dyaw)
-#     theta[:, 1, 0] =  torch.sin(dyaw)
-#     theta[:, 1, 1] =  torch.cos(dyaw)
-#     # translation is only rotation center, pixel shift is handled outside
-#     theta[:, 0, 2] = 0.0
-#     theta[:, 1, 2] = 0.0
-
-#     grid = F.affine_grid(theta, bev_feat.size(), align_corners=False)
-#     warped_feat = F.grid_sample(bev_feat, grid, align_corners=False, padding_mode='border')
-#     visualize_warped_bev(warped_feat)
-#     return warped_feat.squeeze(0), dx_pix.item(), dy_pix.item()
-
-
-def warp_bev_feat(bev_feat, dx, dy, dyaw, voxel_size=0.5, map_size=400):
-    """
-    Apply rotation and translation to the BEV feature map.
-    - Rotation is centered at the image center.
-    - Translation (dx, dy) is applied in pixel units.
-    """
     C, H, W = bev_feat.shape
-    bev_feat = bev_feat.unsqueeze(0)  # shape: (1, C, H, W)
+    H_big, W_big = canvas.shape[2:]
+    device = bev_feat.device
 
-    dx_pix = dx / voxel_size
-    dy_pix = dy / voxel_size
+    # 소스 pixel 좌표 (중심 정렬 → meter로 변환)
+    xs = torch.arange(W, device=device)
+    ys = torch.arange(H, device=device)
+    grid_y, grid_x = torch.meshgrid(ys, xs, indexing='ij')
+    coords = torch.stack([grid_x, grid_y], dim=0).float()  # (2, H, W)
+    coords -= torch.tensor([W / 2, H / 2], device=device).view(2, 1, 1)
+    coords *= voxel_size  # pixel → meter
 
-    # 회전 중심은 이미지 중심
-    center = torch.tensor([W / 2.0, H / 2.0], device=bev_feat.device)
-
-    # 회전 행렬
+    # 회전
     cos_theta = torch.cos(dyaw)
     sin_theta = torch.sin(dyaw)
-    rotation = torch.stack([
-        torch.stack([cos_theta, -sin_theta]),
-        torch.stack([sin_theta,  cos_theta])
-    ])  # shape: (2, 2)
+    rot_mat = torch.tensor([[cos_theta, -sin_theta],
+                            [sin_theta, cos_theta]], device=device)
+    coords_rot = rot_mat @ coords.view(2, -1)  # (2, H*W)
 
-    # 중심 기준 회전 후 translation 적용
-    translation = center - rotation @ center
-    translation[0] += dx_pix
-    translation[1] += dy_pix
+    # 이동
+    coords_rot[0] += dx
+    coords_rot[1] += dy
 
-    # affine 행렬 구성 (2x3)
-    theta = torch.zeros((1, 2, 3), device=bev_feat.device)
-    theta[0, :, :2] = rotation
-    theta[0, :, 2] = translation
+    # canvas 좌표로 변환 (meter → pixel)
+    coords_canvas = coords_rot / voxel_size
+    coords_canvas[0] += W_big / 2
+    coords_canvas[1] += H_big / 2
 
-    # 그리드 생성 및 샘플링
-    visualize_warped_bev(bev_feat, title='Before')
-    grid = F.affine_grid(theta, bev_feat.size(), align_corners=False)
-    warped_feat = F.grid_sample(bev_feat, grid, align_corners=False, padding_mode='zeros')
+    x_canvas = coords_canvas[0].round().long()
+    y_canvas = coords_canvas[1].round().long()
 
-    visualize_warped_bev(warped_feat, title='Warped BEV Feature')
-    return warped_feat.squeeze(0), dx_pix.item(), dy_pix.item()
+    # 유효 좌표만 필터링
+    valid = (x_canvas >= 0) & (x_canvas < W_big) & (y_canvas >= 0) & (y_canvas < H_big)
+    x_canvas = x_canvas[valid]
+    y_canvas = y_canvas[valid]
+    src_feat = bev_feat.view(C, -1)[:, valid]
 
+    # 누적 방식으로 canvas에 삽입
+    for i in range(x_canvas.shape[0]):
+        x, y = x_canvas[i].item(), y_canvas[i].item()
+        canvas[:,:, y, x] += src_feat[:, i]
 
-def visualize_warped_bev(warped_feat, title='Warped BEV Feature'):
-    warped_feat = warped_feat.squeeze(0)
-    warped_feat = warped_feat.squeeze(0)
-    if warped_feat.dim() == 3:
-        # 채널 평균 (예: (C, H, W) → (H, W))
-        bev_img = warped_feat.mean(dim=0).detach().cpu().numpy()
-    elif warped_feat.dim() == 2:
-        bev_img = warped_feat.detach().cpu().numpy()
-    else:
-        raise ValueError("Unexpected warped_feat shape")
-
-    save_path = '/home/sglee6/ysmodel/opencood/models/concat_savefigs/binary_bev_{}_{}.png'.format(
-        datetime.now().strftime("%Y%m%d_%H%M%S"), title)
-
-    plt.figure(figsize=(6, 6))
-    plt.imshow(bev_img, cmap='gray',vmin=0, vmax=1)
-    plt.title(title)
-    plt.axis('off')
-    plt.savefig(save_path)
-
-def get_large_bev(data_aug_conf, encoded_bev, vis_encoded_bev, positions, H_big=400, W_big=400):
-    device = data_aug_conf['device']
-    all_agent_bev_feats = encoded_bev.permute(1, 0, 2, 3, 4)
-    all_vis_agent_feats = vis_encoded_bev.permute(1, 0, 2, 3, 4)
-    positions = positions.permute(1, 0, 2)
-
-    B, N, C, H, W = all_agent_bev_feats.shape
-    canvas = torch.zeros((B, C, H_big, W_big), device=device)
-    vis_canvas = torch.zeros((B, 3, H_big, W_big), device=device)
-    center_x, center_y = H_big // 2, W_big // 2
-    ego_pose = positions[0][0]
-
-    for i in range(N):
-        each_agent_bev_feats = all_agent_bev_feats[0][i] 
-        vis_each_agent_bev_feats = all_vis_agent_feats[0][i]
-        dx, dy, dyaw = get_relative_pose(ego_pose, positions[0][i])
-        
-        warped_feat, dx_pix, dy_pix = warp_bev_feat(each_agent_bev_feats, dx, dy, dyaw)
-        vis_warped_feat, _, _ = warp_bev_feat(vis_each_agent_bev_feats, dx, dy, dyaw)
-
-        # Shift in canvas
-        x_offset = int(round(dx_pix))
-        y_offset = int(round(dy_pix))
-        x_start = center_x - H // 2 + x_offset
-        y_start = center_y - W // 2 + y_offset
-
-        # Boundary check
-        x_end = x_start + H
-        y_end = y_start + W
-        if x_start < 0 or y_start < 0 or x_end > H_big or y_end > W_big:
-            continue  # Skip if out of bounds
-
-        canvas[:, :, x_start:x_end, y_start:y_end] += warped_feat
-        vis_canvas[:, :, x_start:x_end, y_start:y_end] += vis_warped_feat
-
-    # visualize_bev(vis_canvas[0], name="LARGE BEV")
     return canvas
 
+# 전체 large BEV 생성
+def get_large_bev(data_aug_conf, encoded_bev, positions, H_big=400, W_big=400):
+    """
+    encoded_bev shape : (agent_num, Batch, channel, small_H, small_W)
+    position shape : (agent_num, Batch, 6) || 6 : [x,y,z,...]
+    """
+
+    if not hasattr(get_large_bev, "call_count"):
+        get_large_bev.call_count = 0
+    get_large_bev.call_count += 1
+    idx = get_large_bev.call_count
+
+    
+    device = data_aug_conf['device']
+    positions = positions.permute(1, 0, 2)
+
+    N, B, C, H, W = encoded_bev.shape
+    canvas = torch.zeros((B, C, H_big, W_big), device=device)
+    ego_pose = positions[0][0]
+    
+    for i in range(N):
+        each_agent_bev_feats = encoded_bev[i].squeeze(0)        ## each_agent_bev_feats shape :  (C, small_H, small_W)
+
+        ## visualize the bev_feat
+        visualize_bev(encoded_bev,title=f'Before_{i}||{idx}',save=True)
+
+        dx, dy, dyaw = get_relative_pose(ego_pose, positions[0][i])
+        canvas = warp_and_paste_into_large_bev(canvas, each_agent_bev_feats, dx, dy, dyaw)
+
+    visualize_bev(canvas[0],title=f'Concated_{idx}',save=True)
+    return canvas      ## canvas shape : (Batch, channel, large_H, large_W)
 
 
 ###########################################################################
@@ -1296,7 +1262,14 @@ class Mini_cooper(nn.Module):
     def encoding(self, images, intrins, extrins, positions, is_train=True):
         encoded_bev, vis_encoded_bev = Encoding(images, intrins, extrins, self.data_aug_conf, self.grid_conf, is_train)
         # print("ENCODED BEV SHAPE OF MULTI_AGENTS", encoded_bev.shape)     ## (3, 1, 64, 200, 200)
-        mapped_bev= get_large_bev(self.data_aug_conf, encoded_bev, vis_encoded_bev, positions)
+
+        ##          64 channel Case (For Training)
+        # mapped_bev= get_large_bev(self.data_aug_conf, encoded_bev, positions)
+
+        ##          3 channel Case (Visualize Case)
+        mapped_bev= get_large_bev(self.data_aug_conf, vis_encoded_bev, positions)
+
+
         # print("LARGE BEV:::: ", mapped_bev, mapped_bev.shape)
         return mapped_bev    ## true_poas (x,y,yaw) 3차원으로 나옴
     
