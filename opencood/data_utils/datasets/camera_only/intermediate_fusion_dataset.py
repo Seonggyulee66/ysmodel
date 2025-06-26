@@ -219,10 +219,10 @@ class CamIntermediateFusionDataset(base_camera_dataset.BaseCameraDataset):
                         selected_cav_base['merged_bev_dynamic.png'])
             road_bev = \
                 self.post_processor.generate_label(
-                    selected_cav_base['bev_static.png'])
+                    selected_cav_base['merged_bev_static.png'])
             lane_bev = \
                 self.post_processor.generate_label(
-                    selected_cav_base['bev_lane.png'])
+                    selected_cav_base['merged_bev_lane.png'])
             
             static_bev = self.post_processor.merge_label(road_bev, lane_bev)
 
