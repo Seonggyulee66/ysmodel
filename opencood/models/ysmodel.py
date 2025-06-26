@@ -721,8 +721,7 @@ def visualize_bev(bev_feat, title='BEV', save=False):
     plt.title(title)
     plt.axis('off')
     if save == True:
-        save_path = '/home/sglee6/ysmodel/opencood/models/concat_savefigs/binary_bev_{}_{}.png'.format(
-            datetime.now().strftime("%Y%m%d_%H%M%S"), title)
+        save_path = f'/home/sglee6/ysmodel/opencood/models/concat_savefigs/{title}.png'
         plt.savefig(save_path)
     else:
         plt.show()
@@ -779,37 +778,39 @@ def warp_and_paste_into_large_bev(canvas, bev_feat, dx, dy, dyaw, voxel_size=0.5
     return canvas
 
 # 전체 large BEV 생성
-def get_large_bev(data_aug_conf, encoded_bev, positions, H_big=400, W_big=400):
+def get_large_bev(data_aug_conf, encoded_bev,vis_encoded_bev, positions, H_big=400, W_big=400, save_vis = False):
     """
     encoded_bev shape : (agent_num, Batch, channel, small_H, small_W)
     position shape : (agent_num, Batch, 6) || 6 : [x,y,z,...]
     """
 
-    if not hasattr(get_large_bev, "call_count"):
-        get_large_bev.call_count = 0
-    get_large_bev.call_count += 1
-    idx = get_large_bev.call_count
-
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     
     device = data_aug_conf['device']
     positions = positions.permute(1, 0, 2)
 
     N, B, C, H, W = encoded_bev.shape
     canvas = torch.zeros((B, C, H_big, W_big), device=device)
+    N, B, C, H, W = vis_encoded_bev.shape
+    vis_canvas = torch.zeros((B, C, H_big, W_big), device=device)
     ego_pose = positions[0][0]
     
     for i in range(N):
         each_agent_bev_feats = encoded_bev[i].squeeze(0)        ## each_agent_bev_feats shape :  (C, small_H, small_W)
-
-        ## visualize the bev_feat
-        # visualize_bev(encoded_bev,title=f'Before_{i}||{idx}',save=True)
-
         dx, dy, dyaw = get_relative_pose(ego_pose, positions[0][i])
+        
+        ## visualize the bev_feat
+        if save_vis:
+            each_vis_agent_bev_feats = vis_encoded_bev[i].squeeze(0)
+            visualize_bev(each_vis_agent_bev_feats,title=f'Before_{i}_{timestamp}',save=True)
+            vis_canvas = warp_and_paste_into_large_bev(vis_canvas, each_vis_agent_bev_feats, dx, dy, dyaw)
+            
         canvas = warp_and_paste_into_large_bev(canvas, each_agent_bev_feats, dx, dy, dyaw)
 
-    # visualize_bev(canvas[0],title=f'Concated_{idx}',save=True)
+    if save_vis:
+        visualize_bev(vis_canvas[0],title=f'Concated_{timestamp}',save=True)
+        
     return canvas      ## canvas shape : (Batch, channel, large_H, large_W)
-
 
 ###########################################################################
 ###################### DECODER ############################################
@@ -1240,14 +1241,10 @@ class Mini_cooper(nn.Module):
     ############################################################################################
     def encoding(self, images, intrins, extrins, positions, is_train=True):
         encoded_bev, vis_encoded_bev = Encoding(images, intrins, extrins, self.data_aug_conf, self.grid_conf, is_train)
-        # print("ENCODED BEV SHAPE OF MULTI_AGENTS", encoded_bev.shape)     ## (3, 1, 64, 200, 200)
+        print("ENCODED BEV SHAPE OF MULTI_AGENTS", encoded_bev.shape)     ## (3, 1, 64, 200, 200)
 
         ##          64 channel Case (For Training)
-        mapped_bev= get_large_bev(self.data_aug_conf, encoded_bev, positions)
-
-        ##          3 channel Case (Visualize Case)
-        # mapped_bev= get_large_bev(self.data_aug_conf, vis_encoded_bev, positions)
-
+        mapped_bev= get_large_bev(self.data_aug_conf, encoded_bev,vis_encoded_bev, positions,save_vis = False)
 
         # print("LARGE BEV:::: ", mapped_bev, mapped_bev.shape)
         return mapped_bev    ## true_poas (x,y,yaw) 3차원으로 나옴
