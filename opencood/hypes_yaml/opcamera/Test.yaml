@@ -17,7 +17,7 @@ fusion:
   args: []
 
 data_augment: []
-add_data_extension: ['bev_dynamic.png', 'bev_static.png', 'bev_lane.png', 'bev_visibility.png', 'bev_visibility_corp.png','merged_bev_dynamic.png']
+add_data_extension: ['bev_dynamic.png', 'bev_static.png', 'bev_lane.png', 'bev_visibility.png', 'bev_visibility_corp.png','merged_bev_dynamic.png','merged_bev_static.png','merged_bev_lane.png']
 
 # preprocess-related
 preprocess:
@@ -44,7 +44,7 @@ postprocess:
 model:
   core_method: ysmodel
   args:
-    target: &target 'dynamic' # dynamic, static or both
+    target: &target 'both' # dynamic, static or both
     max_cav: *max_cav
     encoder:
       xbound : [-50.0, 50.0, 0.5]
@@ -70,11 +70,14 @@ model:
     deconv:
       large_bev_size : 400
       patch_size :  8
-      N : 4
+      N : 6
       h : 8
       dropout : 0.1 
       d_feed_forward : 1024
       device : 'cuda'
+    
+    dynamic_output_class : 2
+    static_output_class : 3
 
 loss:
   core_method: vanilla_seg_loss
@@ -83,7 +86,7 @@ loss:
     d_weights: 75.0
     s_weights: 15.0
     d_coe: 2.0
-    s_coe: 0.0
+    s_coe: 2.0
     p_coe : 0.0
 
 optimizer:

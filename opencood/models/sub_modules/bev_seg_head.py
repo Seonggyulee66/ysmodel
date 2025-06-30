@@ -8,27 +8,31 @@ from einops import rearrange
 
 
 class BevSegHead(nn.Module):
-    def __init__(self, target, input_dim, output_class):
+    def __init__(self, target, input_dim, dynamic_output_class=None, static_output_class=None):
         super(BevSegHead, self).__init__()
         self.target = target
         if self.target == 'dynamic':
+            assert dynamic_output_class is not None
             self.dynamic_head = nn.Conv2d(input_dim,
-                                          output_class,
+                                          dynamic_output_class,
                                           kernel_size=3,
                                           padding=1)
-        if self.target == 'static':
-            # segmentation head
+
+        elif self.target == 'static':
+            assert static_output_class is not None
             self.static_head = nn.Conv2d(input_dim,
-                                         output_class,
+                                         static_output_class,
                                          kernel_size=3,
                                          padding=1)
-        else:
+
+        else:  # both
+            assert dynamic_output_class is not None and static_output_class is not None
             self.dynamic_head = nn.Conv2d(input_dim,
-                                          output_class,
+                                          dynamic_output_class,
                                           kernel_size=3,
                                           padding=1)
             self.static_head = nn.Conv2d(input_dim,
-                                         output_class,
+                                         static_output_class,
                                          kernel_size=3,
                                          padding=1)
 

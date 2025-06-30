@@ -1163,27 +1163,31 @@ class TSA_Loop(nn.Module):
         return self.norm(bev_query)
 
 class BevSegHead(nn.Module):
-    def __init__(self, target, input_dim, output_class):
+    def __init__(self, target, input_dim, dynamic_output_class=None, static_output_class=None):
         super(BevSegHead, self).__init__()
         self.target = target
         if self.target == 'dynamic':
+            assert dynamic_output_class is not None
             self.dynamic_head = nn.Conv2d(input_dim,
-                                          output_class,
+                                          dynamic_output_class,
                                           kernel_size=3,
                                           padding=1)
-        if self.target == 'static':
-            # segmentation head
+
+        elif self.target == 'static':
+            assert static_output_class is not None
             self.static_head = nn.Conv2d(input_dim,
-                                         output_class,
+                                         static_output_class,
                                          kernel_size=3,
                                          padding=1)
-        else:
+
+        else:  # both
+            assert dynamic_output_class is not None and static_output_class is not None
             self.dynamic_head = nn.Conv2d(input_dim,
-                                          output_class,
+                                          dynamic_output_class,
                                           kernel_size=3,
                                           padding=1)
             self.static_head = nn.Conv2d(input_dim,
-                                         output_class,
+                                         static_output_class,
                                          kernel_size=3,
                                          padding=1)
 
@@ -1241,7 +1245,7 @@ class Mini_cooper(nn.Module):
     ############################################################################################
     def encoding(self, images, intrins, extrins, positions, is_train=True):
         encoded_bev, vis_encoded_bev = Encoding(images, intrins, extrins, self.data_aug_conf, self.grid_conf, is_train)
-        print("ENCODED BEV SHAPE OF MULTI_AGENTS", encoded_bev.shape)     ## (3, 1, 64, 200, 200)
+        # print("ENCODED BEV SHAPE OF MULTI_AGENTS", encoded_bev.shape)     ## (3, 1, 64, 200, 200)
 
         ##          64 channel Case (For Training)
         mapped_bev= get_large_bev(self.data_aug_conf, encoded_bev,vis_encoded_bev, positions,save_vis = False)
@@ -1368,7 +1372,10 @@ def ysmodel(
     dropout = config['deconv']['dropout']
     d_feed_forward = config['deconv']['d_feed_forward']
     device = config['deconv']['device']
-
+    seg_type = config['target']
+    dynamic_output_class = config['dynamic_output_class']
+    static_output_class = config['static_output_class']
+    
     positional_embed = PositionalEncodeing(bev_emb_dim,(large_bev_size//patch_size)**2,dropout,device)
     pseudo_patching = PatchEmbed(img_size=large_bev_size, patch_size=patch_size, in_channels=bev_emb_dim, embed_dim=bev_emb_dim).to(device=device)
     # pseudo_decoding = PatchDecoder(embed_dim=bev_emb_dim, out_channels=bev_emb_dim, patch_size=patch_size, bev_size=large_bev_size).to(device=device)
@@ -1383,7 +1390,7 @@ def ysmodel(
     
     tsa_loop = TSA_Loop(nn.ModuleList(model))
 
-    seg_head = BevSegHead('dynamic',bev_emb_dim,2).to(device=device)    ## 768은 일단은 고정된 값으로 사용한다.
+    seg_head = BevSegHead(seg_type, bev_emb_dim, dynamic_output_class, static_output_class).to(device=device)    
 
     mini_cooper = Mini_cooper(data_aug_conf, grid_conf,pseudo_patching,tsa_loop,positional_embed,pseudo_decoding,seg_head)
 

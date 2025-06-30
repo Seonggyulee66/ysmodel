@@ -215,7 +215,7 @@ def main():
                     # print(f'Step : {i} || Processing Scenario ID : {process_id}')
                     # print(f'Current Scenario ID : {int(batch_data["ego"]["scenario_id"][0][0].item())}')
 
-                    # ### %%%% senario timestamp index test
+                    ### %%%% senario timestamp index test
                     # print(batch_data['ego']['timestamp_key'])
 
                     ##################################################################################
@@ -224,8 +224,9 @@ def main():
                     # logging.info(f"CAV_List: {batch_data['ego']['cav_list']} ||  Distance : {batch_data['ego']['dist_to_ego']}")  # 여기서 출력되는 값이 로그로 기록됩니다.
                     # print(batch_data['ego']['cav_list'])        ## List 형식 Example) [['650','641','659']]
                     # print(batch_data['ego']['dist_to_ego'])     ## Tensor 형식 Example) tensor([[ 0.0000, 30.7861, 20.9463]], device='cuda:0')
-                    # print(batch_data['ego'] ['scenario_id'])    ## Tensor 형식 Example) tensor([[0., 0., 0.]], device='cuda:0')
+                    # print(batch_data['ego']['scenario_id'])    ## Tensor 형식 Example) tensor([[0., 0., 0.]], device='cuda:0')
 
+                    # print(f"Cav_list at scenario : {batch_data['ego']['scenario_id']}, tick : {i} ||| {batch_data['ego']['cav_list']}")
                     ##################################################################################
                     ##################################################################################
 
