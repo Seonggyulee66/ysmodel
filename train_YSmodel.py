@@ -226,7 +226,7 @@ def main():
                     # print(batch_data['ego']['dist_to_ego'])     ## Tensor 형식 Example) tensor([[ 0.0000, 30.7861, 20.9463]], device='cuda:0')
                     # print(batch_data['ego']['scenario_id'])    ## Tensor 형식 Example) tensor([[0., 0., 0.]], device='cuda:0')
 
-                    # print(f"Cav_list at scenario : {batch_data['ego']['scenario_id']}, tick : {i} ||| {batch_data['ego']['cav_list']}")
+                    # print(f"Cav_list at scenario : {batch_data['ego']['scenario_id']}, timestamp_key : {batch_data['ego']['timestamp_key']} ||| {batch_data['ego']['cav_list']}")
                     ##################################################################################
                     ##################################################################################
 
