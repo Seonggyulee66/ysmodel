@@ -19,23 +19,6 @@ from einops import rearrange
 ## python opencood/tools/train_camera.py --hypes_yaml ${CONFIG_FILE} [--model_dir  ${CHECKPOINT_FOLDER}]
 ## CUDA_VISIBLE_DEVICES=0,1,2,3 python -m torch.distributed.launch --nproc_per_node=4  --use_env /home/rina/SG/train_YSmodel.py --hypes_yaml /home/rina/SG/opencood/hypes_yaml/opcamera/Test.yaml --half
 
-# ##################### For Checking
-# import logging
-# import os
-# log_dir = './logs'
-# os.makedirs(log_dir, exist_ok=True)
-# log_file_path = os.path.join(log_dir, 'output_train.log')
-
-# # 로깅 설정
-# logging.basicConfig(
-#     level=logging.INFO,  # 로그 레벨 설정 (INFO 레벨 이상)
-#     format='%(asctime)s - %(levelname)s - %(message)s',
-#     handlers=[
-#         logging.FileHandler(log_file_path),  # 로그를 파일에 기록
-#         logging.StreamHandler()  # 콘솔에 로그 출력
-#     ]
-# )
-
 def train_parser():
     parser = argparse.ArgumentParser(description="synthetic data generation")
     parser.add_argument("--hypes_yaml", type=str, required=True,
@@ -51,7 +34,7 @@ def train_parser():
     opt = parser.parse_args()
     return opt
 
-def main():
+def main(): 
     opt = train_parser()
     hypes = yaml_utils.load_yaml(opt.hypes_yaml, opt)
 
@@ -68,35 +51,55 @@ def main():
     opencood_train_dataset = build_dataset(hypes, visualize=False, train=True)
     opencood_val_dataset = build_dataset(hypes, visualize=False, train=True,
                                          validate=True)
-    
+
     if opt.distributed:
-        sampler_train = DistributedSampler(opencood_train_dataset,shuffle=False)
-        sampler_val = DistributedSampler(opencood_val_dataset, shuffle=False)
+        sampler_train = DistributedSampler(     ## DistributedSampler : 여러 rank(GPU)간에 데이터를 균등하게 나누고 중복 없이 mini batch로 처리
+            opencood_train_dataset,
+            num_replicas = opt.world_size,
+            rank = opt.rank,                    
+            ## Senario 단위 shuffle할지 안할지 결정 [True : Epoch 마다 데이터 순서가 바뀜 ]
+            shuffle = True     
+        )
+        sampler_val = DistributedSampler(
+            opencood_val_dataset, 
+            num_replicas = opt.world_size,
+            rank = opt.rank,
+            shuffle = True     ## Senario 단위 shuffle할지 안할지 결정
+        ) 
 
-        batch_sampler_train = torch.utils.data.BatchSampler(
-            sampler_train, hypes['train_params']['batch_size'], drop_last=True)
+        ## DataLoader num_workers=20이면 최대 num_workders x prefetch_factore(default = 2)만큼 샘플을 미리 준비함
+        train_loader = DataLoader(
+            opencood_train_dataset,
+            # ✅ 핵심: scenario 단위 batch! 
+            # -> 현 구조는 Scenario 단위로 묶어서 __getitem__()으로 시퀀스 통째로 반환하기 때문에 이미 batch 개념을 포함하고 있음
+            batch_size=1,   
+            sampler=sampler_train,
+            num_workers=20,     ### num_workers가 커지면, 여러 worker가 같은 파일에 동시 접근하면서 disk I/O 충돌이 날 수 있음
+            pin_memory = False,
+            collate_fn=opencood_train_dataset.collate_batch
+        )
 
-        train_loader = DataLoader(opencood_train_dataset,
-                                  batch_sampler=batch_sampler_train,
-                                  num_workers=30,
-                                  collate_fn=opencood_train_dataset.collate_batch)
-        val_loader = DataLoader(opencood_val_dataset,
-                                sampler=sampler_val,
-                                num_workers=30,
-                                collate_fn=opencood_train_dataset.collate_batch,
-                                drop_last=False)
+        val_loader = DataLoader(
+                opencood_val_dataset,
+                batch_size=1,   # ✅ 동일
+                sampler=sampler_val,
+                num_workers=20,
+                pin_memory = False,
+                collate_fn=opencood_train_dataset.collate_batch
+        )
+    
     else:
         train_loader = DataLoader(opencood_train_dataset,
                                   batch_size=hypes['train_params'][
                                       'batch_size'],
-                                  num_workers=30,
+                                  num_workers=20,
                                   collate_fn=opencood_train_dataset.collate_batch,
                                   shuffle=False,
                                   pin_memory=False,
                                   drop_last=True)
         val_loader = DataLoader(opencood_val_dataset,
                                 batch_size=hypes['train_params']['batch_size'],
-                                num_workers=30,
+                                num_workers=20,
                                 collate_fn=opencood_train_dataset.collate_batch,
                                 shuffle=False,
                                 pin_memory=False,
@@ -128,13 +131,6 @@ def main():
                                                       find_unused_parameters=True)
         model_without_ddp = model.module
 
-    # #######################################################################################################################
-    # image_encoder = EfficientNetFeatureExtractor().to(device=device)
-    # image_encoder.eval()  ## eval mode로 설정
-    # bev_generator = BEVGenerator(bev_size=hypes['model']['args']['encoder']['bev_size'], embed_dim=hypes['model']['args']['encoder']['embed_dim'],\
-    #                               num_heads=hypes['model']['args']['encoder']['num_heads'], num_cameras=hypes['model']['args']['encoder']['num_cameras']).to(device)
-    # #######################################################################################################################
-
     # define the loss
     criterion = train_utils.create_loss(hypes)
 
@@ -150,7 +146,7 @@ def main():
 
     # lr scheduler setup
     epoches = hypes['train_params']['epoches']
-    num_steps = len(train_loader)
+    num_steps = len(train_loader)               ## 총 scenario 개수 43개
     scheduler = train_utils.setup_lr_schedular(hypes, optimizer, num_steps)
 
     # ## printing the number of parameters layer by layer
@@ -165,9 +161,11 @@ def main():
     # total_params = count_parameters(model)
     # print(f"Total Trainable Parameters: {total_params}")
 
-    print('Training start with num steps of %d' % num_steps)    ## 총 시나리오의 tick 개수\
+    print('Training start with num steps of %d' % num_steps)    ## EX) gpu 2개 사용시, (22, 22)개씩 나누어서 계산한다 여기서 개수가 맞지 않는데 이것은 1개가 duplicated
 
-    process_id = None
+    num_scenarios_per_epoch = len(train_loader)  # ex) 42
+
+    global_tick_step = 0  # ✅ tick global step
 
     # used to help schedule learning rate
     for epoch in range(init_epoch, max(epoches, init_epoch)):
@@ -175,195 +173,218 @@ def main():
         for param_group in optimizer.param_groups:
             print('learning rate %.7f' % param_group["lr"])
 
-        if opt.distributed:
-            sampler_train.set_epoch(epoch)
+        if opt.distributed:       
+            sampler_train.set_epoch(epoch)        ## set_epoch : 매 epoch 마다 seed를 다르게해서, 샘플 순서가 달라지도록 만듬
 
         pbar2 = tqdm.tqdm(total=len(train_loader), leave=True)
-
-        ## batch_data => 한 시나리오의 한 tick의 이미지 데이터들
-        for i, batch_data in enumerate(train_loader):
-            # the model will be evaluation mode during validation
+        
+        ######################################################################################################################
+        ######################################################################################################################
+        ##                              현재 Dataset을 정리하는게 시간이 조금 걸리는것으로 보임
+        ##                              1. DataLoader + collate_batch에서 CPU -> Numpy -> torch 과정이 CPU에서 발생 -> num_workers 조정 필요
+        ##                              2. Scenario 단위라 tick수가 길면 메모리가 많이 필요함
+        ##                              
+        ######################################################################################################################
+        ######################################################################################################################
+        
+        for i,scenario_batch in enumerate(train_loader):
+            scenario_id_check = scenario_batch['ego']['scenario_id'][0]
+            print(f"[Batch index {i}] scenario_id_check : {scenario_id_check}")
+             
+            # scenario_batch : dictionary 
             model.train()
-            model.zero_grad()
             optimizer.zero_grad()
-            batch_data = train_utils.to_device(batch_data, device)
+                
+            encoding_input_images = scenario_batch['ego']['inputs']         ## ex) INPUT IMAGES :  
+            encoding_input_intrins = scenario_batch['ego']['intrinsic']
+            encoding_input_extrins = scenario_batch['ego']['extrinsic']
+            encoding_input_locs = scenario_batch['ego']['agent_true_loc']
 
-            if not opt.half:
-                print('This option is not yet set add --half in the end of the commend')
-                continue
-            else:
-                with torch.cuda.amp.autocast():
-                    # print(f'The number of Agents : {batch_data["ego"]["inputs"].shape[0]}')
-    #####################################################################################################################################
-    ###                                      
-    ###                                      opencodd/data_utils/datasets/__init__.COM_RANGE 를 상당히 높게 조정하여 모든 agent를 포함하게 만들엇음ㄴ
-    #####################################################################################################################################
-                    encoding_input_images = batch_data['ego']['inputs']
-                    # print("??????????????????", encoding_input_images.shape)   ## Torch.Size([2, 4, 512, 512, 3])  !!!! 여기서 이미지는 preprocessing 한 데이터
-                    encoding_input_intrins = batch_data['ego']['intrinsic']
-                    encoding_input_extrins = batch_data['ego']['extrinsic']
-                    encoding_input_locs = batch_data['ego']['agent_true_loc']
+            prev_encoding_result = None
+            
+            print("INPUT IMAGES : ", encoding_input_images.shape)   
+            print("INTRINSIC : ", encoding_input_intrins.shape)   
+            print("EXTRINSIC : ", encoding_input_extrins.shape)   
+            print("POSITION : ", encoding_input_locs.shape)   
+            print("timestamp_key:", scenario_batch['ego']['timestamp_key'].shape)
 
-                    # print("INPUT IMAGES : ", encoding_input_images.shape)   ## Torch.Size([2, 4, 512, 512, 3])  !!!! 여기서 이미지는 preprocessing 한 데이터
-                    # print("INTRINSIC : ", encoding_input_intrins.shape)   ## Torch.Size([2, 4, 3, 3])
-                    # print("EXTRINSIC : ", encoding_input_extrins.shape)   ## Torch.Size([2, 4, 3, 3])
-                    # print("POSITION : ", encoding_input_locs.shape)   ## Torch.Size([2, 4, 3, 3])
+            assert encoding_input_images.shape[0] == encoding_input_intrins.shape[0] == encoding_input_extrins.shape[0] == encoding_input_locs.shape[0], \
+                f"Batch size mismatch: images={encoding_input_images.shape[0]}, intrins={encoding_input_intrins.shape[0]}, extrins={encoding_input_extrins.shape[0]}, locs={encoding_input_locs.shape[0]}"
+        
+            for tick_idx in range(encoding_input_images.shape[0]):
+                
+                print(f"tick_idx : {tick_idx} || timestamp_key : {scenario_batch['ego']['timestamp_key'][tick_idx]}", end = ' ')
+            print()
+                # tick_input_images = encoding_input_images[tick_index].to(device)
+                # tick_input_intrins = encoding_input_intrins[tick_index].to(device)
+                # tick_input_extrins = encoding_input_extrins[tick_index].to(device)
+                # tick_input_locs = encoding_input_locs[tick_index].to(device)
+                
+                # if not opt.half:
+                #     print('This option is not yet set add --half in the end of the commend')
+                #     continue
+                # else:
+                #     with torch.cuda.amp.autocast():
+                #         # 첫 tick은 prev_encoding_result 초기화
+                #         current_encoding_result = model.module.encoding(
+                #             tick_input_images,
+                #             tick_input_intrins,
+                #             tick_input_extrins,
+                #             tick_input_locs,
+                #             is_train=True
+                #         )
 
-                    if process_id == None:
-                        process_id = int(batch_data['ego']['scenario_id'][0][0].item())
+                #         if prev_encoding_result is None:
+                #             model_output_dict = model.module.forward(
+                #                 current_encoding_result,
+                #                 current_encoding_result,  # 첫 tick은 self
+                #                 bool_prev_pos_encoded=False
+                #             )
+                #         else:
+                #             model_output_dict = model.module.forward(
+                #                 current_encoding_result,
+                #                 prev_encoding_result,
+                #                 bool_prev_pos_encoded=True
+                #             )            
+                        
+                #         ## 이전에는 tick별 처리로 batch_data로 처리하였지만, 현재는 scenario_batch로 처리하기 떄문에
+                #         ## vanila_seg_loss를 위한 임시 dictionary를 생성해줘야함
+                #         gt_tick = {
+                #             'gt_static' : scenario_batch['ego']['gt_static'][tick_idx].to(device)
+                #             'gt_dynamic' : scenario_batch['ego']['gt_dynamic'][tick_idx].to(device)
+                #         }
+                        
+                #         final_loss = criterion(model_output_dict, gt_tick)
+                #         # print(final_loss)
 
-                    # print(f'Step : {i} || Processing Scenario ID : {process_id}')
-                    # print(f'Current Scenario ID : {int(batch_data["ego"]["scenario_id"][0][0].item())}')
-
-                    ### %%%% senario timestamp index test
-                    # print(batch_data['ego']['timestamp_key'])
-
-                    ##################################################################################
-                    ###                             dictionary 추가 사항들
-                    ##################################################################################
-                    # logging.info(f"CAV_List: {batch_data['ego']['cav_list']} ||  Distance : {batch_data['ego']['dist_to_ego']}")  # 여기서 출력되는 값이 로그로 기록됩니다.
-                    # print(batch_data['ego']['cav_list'])        ## List 형식 Example) [['650','641','659']]
-                    # print(batch_data['ego']['dist_to_ego'])     ## Tensor 형식 Example) tensor([[ 0.0000, 30.7861, 20.9463]], device='cuda:0')
-                    # print(batch_data['ego']['scenario_id'])    ## Tensor 형식 Example) tensor([[0., 0., 0.]], device='cuda:0')
-
-                    # print(f"Cav_list at scenario : {batch_data['ego']['scenario_id']}, timestamp_key : {batch_data['ego']['timestamp_key']} ||| {batch_data['ego']['cav_list']}")
-                    ##################################################################################
-                    ##################################################################################
-
-                    ## current encoding result shape : torch.Size([64, 400, 400])
-                    if i == 0 or (process_id != int(batch_data['ego']['scenario_id'][0][0].item())):
-                        # current_encoding_result, current_corr, current_sigma, current_true_pos, current_selected_cav = model.module.encoding(encoding_input_images,encoding_input_intrins,encoding_input_extrins,encoding_input_locs,is_train=True)      
-                        # prev_encoding_result, prev_corr, prev_sigma, prev_true_pos, prev_selected_cav = model.module.encoding(encoding_input_images,encoding_input_intrins,encoding_input_extrins,encoding_input_locs,is_train=True)
-                        current_encoding_result = model.module.encoding(encoding_input_images,encoding_input_intrins,encoding_input_extrins,encoding_input_locs, is_train=True)      
-                        prev_encoding_result = model.module.encoding(encoding_input_images,encoding_input_intrins,encoding_input_extrins,encoding_input_locs, is_train=True)
-                        process_id = int(batch_data['ego']['scenario_id'][0][0].item())
-                        # model_output_dict = model.module.forward(current_encoding_result, prev_encoding_result, current_corr, current_sigma, current_true_pos, bool_prev_pos_encoded=False)
-                        dummy_corr = 0
-                        dummy_sigma = 0
-                        dummy_true_pose = torch.rand((1,1,1,1))
-                        model_output_dict = model.module.forward(current_encoding_result, prev_encoding_result, dummy_corr, dummy_sigma, dummy_true_pose, bool_prev_pos_encoded=False)
-                    else:
-                        # current_encoding_result, current_corr, current_sigma, current_true_pos, current_selected_cav = model.module.encoding(encoding_input_images,encoding_input_intrins,encoding_input_extrins,encoding_input_locs,is_train=True)
-                        # model_output_dict = model.module.forward(current_encoding_result, prev_encoding_result, current_corr, current_sigma, current_true_pos, bool_prev_pos_encoded=True)             
-                        current_encoding_result = model.module.encoding(encoding_input_images,encoding_input_intrins,encoding_input_extrins,encoding_input_locs, is_train=True)
-                        dummy_corr = 0
-                        dummy_sigma = 0
-                        dummy_true_pose = torch.rand((1,1,1,1))
-                        model_output_dict = model.module.forward(current_encoding_result, prev_encoding_result, dummy_corr, dummy_sigma, dummy_true_pose, bool_prev_pos_encoded=True)             
+        #         prev_encoding_result = current_encoding_result 
                     
-                    # if current_selected_cav is not None:
-                    #     print("Current Selected CAV : ", batch_data['ego'].keys())
+        #         if not opt.half:
+        #             final_loss.backward(retain_graph=True)
+        #             optimizer.step()
+        #         else:
+        #             scaler.scale(final_loss).backward(retain_graph=True)
+        #             scaler.step(optimizer)
+        #             scaler.update()
+        #         # print('--------------------------------------------------')
 
-                    final_loss = criterion(model_output_dict, batch_data['ego'])
-                    # print(final_loss)
+        #         scheduler.step_update(global_tick_step)
 
-                    prev_encoding_result = current_encoding_result 
+        #         criterion.logging(epoch, global_tick_step, len(train_loader), writer, pbar=pbar2)
+        #         pbar2.update(1)
+
+        #         for lr_idx, param_group in enumerate(optimizer.param_groups):
+        #             writer.add_scalar(f'lr_{lr_idx}', param_group["lr"], global_tick_step)
+
+        #         # ✅ tick step 증가!
+        #         global_tick_step += 1
+                
+        # if epoch % hypes['train_params']['eval_freq'] == 0:
+        #     valid_ave_loss = []
+        #     dynamic_ave_iou = []
+
+        #     for i, scenario_batch in enumerate(val_loader):
+        #         model.eval()
+
+        #         scenario_batch = train_utils.to_device(scenario_batch, device)
+
+        #         encoding_input_images = scenario_batch['ego']['inputs']
+        #         encoding_input_intrins = scenario_batch['ego']['intrinsic']
+        #         encoding_input_extrins = scenario_batch['ego']['extrinsic']
+        #         encoding_input_locs = scenario_batch['ego']['agent_true_loc']
+
+        #         prev_encoding_result = None
+                
+        #         for tick_idx in range(encoding_input_images.shape[0]):
                     
-                    # print('--------------------------------------------------')
-
-                criterion.logging(epoch, i, len(train_loader), writer,
-                                pbar=pbar2)
-                pbar2.update(1)
-
-                # update the lr to tensorboard
-                for lr_idx, param_group in enumerate(optimizer.param_groups):
-                    writer.add_scalar('lr_%d' % lr_idx, param_group["lr"],
-                                    epoch * num_steps + i)
-
-                if not opt.half:
-                    final_loss.backward(retain_graph=True)
-                    optimizer.step()
-                else:
-                    scaler.scale(final_loss).backward(retain_graph=True)
-                    scaler.step(optimizer)
-                    scaler.update()
-
-                scheduler.step_update(epoch * num_steps + i)
-
-        if epoch % hypes['train_params']['eval_freq'] == 0:
-            valid_ave_loss = []
-            dynamic_ave_iou = []
-
-            with torch.no_grad():
-                for i, batch_data in enumerate(val_loader):
-                    model.eval()
-
-                    batch_data = train_utils.to_device(batch_data, device)
-                    encoding_input_images = batch_data['ego']['inputs']
-                    encoding_input_intrins = batch_data['ego']['intrinsic']
-                    encoding_input_extrins = batch_data['ego']['extrinsic']
-                    encoding_input_locs = batch_data['ego']['agent_true_loc']
+        #             tick_input_images = encoding_input_images[tick_index]
+        #             tick_input_intrins = encoding_input_intrins[tick_index]
+        #             tick_input_extrins = encoding_input_extrins[tick_index]
+        #             tick_input_locs = encoding_input_locs[tick_index]
                     
-                    # print("INPUT IMAGES : ", encoding_input_images.shape)   ## Torch.Size([2, 4, 512, 512, 3])  !!!! 여기서 이미지는 preprocessing 한 데이터
-                    # print("INTRINSIC : ", encoding_input_intrins.shape)   ## Torch.Size([2, 4, 3, 3])
-                    # print("EXTRINSIC : ", encoding_input_extrins.shape)   ## Torch.Size([2, 4, 3, 3])
-                    # print("POSITION : ", encoding_input_locs.shape)   ## Torch.Size([2, 4, 3, 3])
+        #             current_encoding_result = model.module.encoding(
+        #             tick_input_images,
+        #             tick_input_intrins,
+        #             tick_input_extrins,
+        #             tick_input_locs,
+        #             is_train=False
+        #             )
 
-                    if process_id == None:
-                        process_id = int(batch_data['ego']['scenario_id'][0][0].item())
+        #             if prev_encoding_result is None:
+        #                 model_output_dict = model.module.forward(
+        #                     current_encoding_result,
+        #                     current_encoding_result,
+        #                     bool_prev_pos_encoded=False
+        #                 )
+        #             else:
+        #                 model_output_dict = model.module.forward(
+        #                     current_encoding_result,
+        #                     prev_encoding_result,
+        #                     bool_prev_pos_encoded=True
+        #                 )
+                    
+        #             gt_tick = {
+        #                     'gt_static' : scenario_batch['ego']['gt_static'][tick_idx]
+        #                     'inputs': scenario_batch['ego']['inputs'][tick_idx],
+        #                     'extrinsic': scenario_batch['ego']['extrinsic'][tick_idx],
+        #                     'intrinsic': scenario_batch['ego']['intrinsic'][tick_idx],
+        #                     'gt_static': scenario_batch['ego']['gt_static'][tick_idx],
+        #                     'gt_dynamic': scenario_batch['ego']['gt_dynamic'][tick_idx],
+        #                     'transformation_matrix': scenario_batch['ego']['trainsformation_matrix'][tick_idx],
+        #                     'pairwise_t_matrix': scenario_batch['ego']['pairwise_t_matrix'][tick_idx],
+        #                     'record_len': scenario_batch['ego']['record_len'][tick_idx],
+        #                     'scenario_id': scenario_batch['ego']['scenario_id'][tick_idx],
+        #                     'agent_true_loc' : scenario_batch['ego']['agent_true_loc'][tick_idx],
+        #                     'cav_list' : scenario_batch['ego']['cav_list'][tick_idx],
+        #                     # 'dist_to_ego' : distance_all_batch,
+        #                     'single_bev' : scenario_batch['ego']['single_bev'][tick_idx],
+        #                     'timestamp_key' : scenario_batch['ego']['timestamp_key'][tick_idx]
+        #             }
+                    
+        #             final_loss = criterion(model_output_dict, gt_tick)
+        #             valid_ave_loss.append(final_loss.item())
 
-                    # print(f'Processing Scenario ID : {process_id}')
-                    # print(f'Current Scenario ID : {int(batch_data["ego"]["scenario_id"][0][0].item())}')
+        #             prev_encoding_result = current_encoding_result
 
-                    ## current encoding result shape : torch.Size([64, 400, 400])
-                    if i == 0 or (process_id != int(batch_data['ego']['scenario_id'][0][0].item())):
-                        current_encoding_result = model.module.encoding(encoding_input_images,encoding_input_intrins,encoding_input_extrins,encoding_input_locs, is_train=True)      
-                        prev_encoding_result= model.module.encoding(encoding_input_images,encoding_input_intrins,encoding_input_extrins,encoding_input_locs, is_train=True)
-                        process_id = int(batch_data['ego']['scenario_id'][0][0].item())
-                        dummy_corr = 0
-                        dummy_sigma = 0
-                        dummy_true_pose = torch.rand((1,1,1,1))
-                        model_output_dict = model.module.forward(current_encoding_result, prev_encoding_result, dummy_corr, dummy_sigma, dummy_true_pose, bool_prev_pos_encoded=False)
-                    else:
-                        dummy_corr = 0
-                        dummy_sigma = 0
-                        dummy_true_pose = torch.rand((1,1,1,1))
-                        current_encoding_result = model.module.encoding(encoding_input_images,encoding_input_intrins,encoding_input_extrins,encoding_input_locs, is_train=True)
-                        model_output_dict = model.module.forward(current_encoding_result, prev_encoding_result, dummy_corr, dummy_sigma, dummy_true_pose, bool_prev_pos_encoded=True)
-
-                    final_loss = criterion(model_output_dict,
-                                           batch_data['ego'])
-                    valid_ave_loss.append(final_loss.item())
-
-                    # visualization purpose
-                    model_output_dict = \
-                        opencood_val_dataset.post_process(batch_data['ego'],
-                                                          model_output_dict)
-                    train_utils.save_bev_seg_binary(model_output_dict,              ## logs/ys_model_xxxxxx/train_vis
-                                                    batch_data,
-                                                    saved_path,
-                                                    i,
-                                                    epoch)
-                    iou_dynamic = cal_iou_training(batch_data,
-                                                 model_output_dict)
-                    # static_ave_iou.append(iou_static[1])
-                    dynamic_ave_iou.append(iou_dynamic[1])
-                    # lane_ave_iou.append(iou_static[2])
+        #             # visualization purpose
+        #             model_output_dict = \
+        #                 opencood_val_dataset.post_process(gt_tick,
+        #                                                     model_output_dict)
+        #             train_utils.save_bev_seg_binary(model_output_dict,              ## logs/ys_model_xxxxxx/train_vis
+        #                                             gt_tick,
+        #                                             saved_path,
+        #                                             i,
+        #                                             epoch)
+        #             iou_dynamic = cal_iou_training(gt_tick,
+        #                                             model_output_dict)
+        #             # static_ave_iou.append(iou_static[1])
+        #             dynamic_ave_iou.append(iou_dynamic[1])
+        #             # lane_ave_iou.append(iou_static[2])
 
 
-            valid_ave_loss = statistics.mean(valid_ave_loss)
-            # static_ave_iou = statistics.mean(static_ave_iou)
-            # lane_ave_iou = statistics.mean(lane_ave_iou)
-            dynamic_ave_iou = statistics.mean(dynamic_ave_iou)
+        #         valid_ave_loss = statistics.mean(valid_ave_loss)
+        #         # static_ave_iou = statistics.mean(static_ave_iou)
+        #         # lane_ave_iou = statistics.mean(lane_ave_iou)
+        #         dynamic_ave_iou = statistics.mean(dynamic_ave_iou)
 
-            print('At epoch %d, the validation loss is %f,'
-                  'the dynamic iou is %f, t'
-                   % (epoch,
-                    valid_ave_loss,
-                    dynamic_ave_iou,
-                    ))
+        #         print('At epoch %d, the validation loss is %f,'
+        #             'the dynamic iou is %f, t'
+        #             % (epoch,
+        #                 valid_ave_loss,
+        #                 dynamic_ave_iou,
+        #                 ))
 
-            writer.add_scalar('Validate_Loss', valid_ave_loss, epoch)
-            writer.add_scalar('Dynamic_Iou', dynamic_ave_iou, epoch)
-            # writer.add_scalar('Road_IoU', static_ave_iou, epoch)
-            # writer.add_scalar('Lane_IoU', static_ave_iou, epoch)
+        #         writer.add_scalar('Validate_Loss', valid_ave_loss, epoch)
+        #         writer.add_scalar('Dynamic_Iou', dynamic_ave_iou, epoch)
+        #         # writer.add_scalar('Road_IoU', static_ave_iou, epoch)
+        #         # writer.add_scalar('Lane_IoU', static_ave_iou, epoch)
 
-        if epoch % hypes['train_params']['save_freq'] == 0:
-            torch.save(model_without_ddp.state_dict(),
-                       os.path.join(saved_path,
-                                    'net_epoch%d.pth' % (epoch + 1)))
+        # if epoch % hypes['train_params']['save_freq'] == 0:
+        #     torch.save(model_without_ddp.state_dict(),
+        #                os.path.join(saved_path,
+        #                             'net_epoch%d.pth' % (epoch + 1)))
 
-        opencood_train_dataset.reinitialize()
+        # opencood_train_dataset.reinitialize()
 
 
 if __name__ == '__main__':

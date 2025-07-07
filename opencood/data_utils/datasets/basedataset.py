@@ -108,9 +108,22 @@ class BaseDataset(Dataset):
                                         for x in os.listdir(root_dir) if
                                         os.path.isdir(
                                             os.path.join(root_dir, x))])
+        self.scenario_idx_list = range(len(self.scenario_folders))
         
         self.reinitialize()
-
+        
+    def get_tick_indices_for_scenario(self,scenario_id):
+        cav_list = [x for x in os.listdir(self.scenario_folders[scenario_id])
+                            if os.path.isdir(
+                        os.path.join(self.scenario_folders[scenario_id], x))]
+        cav_path = os.path.join(self.scenario_folders[scenario_id], cav_list[0])
+        yaml_files = \
+                    sorted([os.path.join(cav_path, x)
+                            for x in os.listdir(cav_path) if
+                            x.endswith('.yaml') and 'additional' not in x])
+        timestamps = self.extract_timestamps(yaml_files)
+        return timestamps       ## ['000069', '000071', '000073', '000075',,,,,]
+        
     def __len__(self):
         return self.len_record[-1]
 

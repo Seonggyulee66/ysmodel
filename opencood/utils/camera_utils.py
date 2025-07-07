@@ -25,8 +25,14 @@ def load_rgb_from_files(camera_list):
     """
     camera_dict = OrderedDict()
     for (i, camera_file) in enumerate(camera_list):
-        camera_dict['camera%d' % i] = cv2.imread(camera_file)
+        rgb_image = cv2.imread(camera_file)
 
+        if rgb_image is None:
+            print(f"[ERROR] load_rgb_from_files(): Failed to load image: {camera_file}")
+            raise ValueError(f"Image is None! File may be missing or corrupted: {camera_file}")
+        
+        camera_dict['camera%d' % i] = rgb_image
+        
     return camera_dict
 
 

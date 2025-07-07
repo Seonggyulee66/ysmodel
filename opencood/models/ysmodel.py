@@ -1286,7 +1286,7 @@ class Mini_cooper(nn.Module):
             dictionary[key] = [value]
         return dictionary
 
-    def forward(self, current_bev, prev_bev, corr, sigma, true_pos, bool_prev_pos_encoded):
+    def forward(self, current_bev, prev_bev, bool_prev_pos_encoded):
 
         loop_output = self.loop_output(current_bev, prev_bev,bool_prev_pos_encoded)
         # print(f'Loop Output shape : {loop_output.shape}')
@@ -1294,9 +1294,6 @@ class Mini_cooper(nn.Module):
         # print(f'After PostProcessing from loop output : {model_output.shape}')  ## shape : torch.Size([1, 64, 400, 400])
         seg_loss_dict = self.seg_head(model_output)
         # print(f'Head Output shape : {head_output["dynamic_seg"].shape}')
-        max_vals = true_pos.max(dim=1)[0].unsqueeze(1).unsqueeze(2).unsqueeze(3)  # (B, 1, 1, 1)
-        min_vals = true_pos.min(dim=1)[0].unsqueeze(1).unsqueeze(2).unsqueeze(3)  # (B, 1, 1, 1)
-
         
         dummy_pos_loss = torch.randn(1).to('cuda')
         final_dict = self.add_item_to_dict(seg_loss_dict,'pos_loss', dummy_pos_loss)

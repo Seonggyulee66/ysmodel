@@ -1,12 +1,14 @@
 from opencood.data_utils.datasets.camera_only.base_camera_dataset import BaseCameraDataset
 from opencood.data_utils.datasets.camera_only.late_fusion_dataset import CamLateFusionDataset
 from opencood.data_utils.datasets.camera_only.intermediate_fusion_dataset import CamIntermediateFusionDataset
+from opencood.data_utils.datasets.camera_only.intermediate_fusion_dataset_per_scenario import CamIntermediateFusionDataset_per_scenario
 from opencood.data_utils.datasets.intermediate_fusion_dataset_v2 import IntermediateFusionDatasetV2
 __all__ = {
     'BaseCameraDataset': BaseCameraDataset,
     'CamLateFusionDataset': CamLateFusionDataset,
     'CamIntermediateFusionDataset': CamIntermediateFusionDataset,
-    'IntermediateFusionDatasetV2' : IntermediateFusionDatasetV2
+    'IntermediateFusionDatasetV2' : IntermediateFusionDatasetV2,
+    'CamIntermediateFusionDataset_per_scenario' : CamIntermediateFusionDataset_per_scenario
 }
 
 # the final range for evaluation
@@ -25,6 +27,7 @@ def build_dataset(dataset_cfg, visualize=False, train=True, validate=False):
                             'IntermediateFusionDataset',
                             'CamLateFusionDataset',
                             'CamIntermediateFusionDataset',
+                            'CamIntermediateFusionDataset_per_scenario',
                             'BaseCameraDataset',
                             'IntermediateFusionDatasetV2'], error_message
 

@@ -13,7 +13,7 @@ train_params:
 
 
 fusion:
-  core_method: 'CamIntermediateFusionDataset' # LateFusionDataset, EarlyFusionDataset, IntermediateFusionDataset supported
+  core_method: 'CamIntermediateFusionDataset_per_scenario' # LateFusionDataset, EarlyFusionDataset, IntermediateFusionDataset supported
   args: []
 
 data_augment: []
@@ -70,7 +70,7 @@ model:
     deconv:
       large_bev_size : 400
       patch_size :  8
-      N : 6
+      N : 4
       h : 8
       dropout : 0.1 
       d_feed_forward : 1024
