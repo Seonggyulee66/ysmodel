@@ -189,13 +189,14 @@ def main():
         
         for i,scenario_batch in enumerate(train_loader):
             scenario_id_check = scenario_batch['ego']['scenario_id'][0]
-            print(f"[Batch index {i}] scenario_id_check : {scenario_id_check}")
+            # print(f"[Batch index {i}] scenario_id_check : {scenario_id_check}")
              
             # scenario_batch : dictionary 
             model.train()
             optimizer.zero_grad()
                 
-            encoding_input_images = scenario_batch['ego']['inputs']         ## ex) INPUT IMAGES :  
+            ## collate batch를 거친 후의 값이므로 이미지 input을 예를 들면 [num_ticks, num_agents (ego 포함), 1, H, W C]
+            encoding_input_images = scenario_batch['ego']['inputs']         ## ex) INPUT IMAGES : torch.Size([194, 2, 1, 4, 512, 512, 3])  
             encoding_input_intrins = scenario_batch['ego']['intrinsic']
             encoding_input_extrins = scenario_batch['ego']['extrinsic']
             encoding_input_locs = scenario_batch['ego']['agent_true_loc']
@@ -204,58 +205,58 @@ def main():
             
             print("INPUT IMAGES : ", encoding_input_images.shape)   
             print("INTRINSIC : ", encoding_input_intrins.shape)   
-            print("EXTRINSIC : ", encoding_input_extrins.shape)   
+            print("EXTRINSIC : ", encoding_input_extrins.shape) 
+            print(f"Treu LOC : {encoding_input_locs.shape}")
             print("POSITION : ", encoding_input_locs.shape)   
             print("timestamp_key:", scenario_batch['ego']['timestamp_key'].shape)
 
-            assert encoding_input_images.shape[0] == encoding_input_intrins.shape[0] == encoding_input_extrins.shape[0] == encoding_input_locs.shape[0], \
-                f"Batch size mismatch: images={encoding_input_images.shape[0]}, intrins={encoding_input_intrins.shape[0]}, extrins={encoding_input_extrins.shape[0]}, locs={encoding_input_locs.shape[0]}"
+            # assert encoding_input_images.shape[0] == encoding_input_intrins.shape[0] == encoding_input_extrins.shape[0] == encoding_input_locs.shape[0], \
+            #     f"Batch size mismatch: images={encoding_input_images.shape[0]}, intrins={encoding_input_intrins.shape[0]}, extrins={encoding_input_extrins.shape[0]}, locs={encoding_input_locs.shape[0]}"
         
-            for tick_idx in range(encoding_input_images.shape[0]):
+            # for tick_idx in range(encoding_input_images.shape[0]):
                 
-                print(f"tick_idx : {tick_idx} || timestamp_key : {scenario_batch['ego']['timestamp_key'][tick_idx]}", end = ' ')
-            print()
-                # tick_input_images = encoding_input_images[tick_index].to(device)
-                # tick_input_intrins = encoding_input_intrins[tick_index].to(device)
-                # tick_input_extrins = encoding_input_extrins[tick_index].to(device)
-                # tick_input_locs = encoding_input_locs[tick_index].to(device)
+            #     # print(f"tick_idx : {tick_idx} || timestamp_key : {scenario_batch['ego']['timestamp_key'][tick_idx].squeeze().tolist()}")
+            #     tick_input_images = encoding_input_images[tick_idx].to(device)
+            #     tick_input_intrins = encoding_input_intrins[tick_idx].to(device)
+            #     tick_input_extrins = encoding_input_extrins[tick_idx].to(device)
+            #     tick_input_locs = encoding_input_locs[tick_idx].to(device)
                 
-                # if not opt.half:
-                #     print('This option is not yet set add --half in the end of the commend')
-                #     continue
-                # else:
-                #     with torch.cuda.amp.autocast():
-                #         # 첫 tick은 prev_encoding_result 초기화
-                #         current_encoding_result = model.module.encoding(
-                #             tick_input_images,
-                #             tick_input_intrins,
-                #             tick_input_extrins,
-                #             tick_input_locs,
-                #             is_train=True
-                #         )
+            #     if not opt.half:
+            #         print('This option is not yet set add --half in the end of the commend')
+            #         continue
+            #     else:
+            #         with torch.cuda.amp.autocast():
+            #             # 첫 tick은 prev_encoding_result 초기화
+            #             current_encoding_result = model.module.encoding(
+            #                 tick_input_images,
+            #                 tick_input_intrins,
+            #                 tick_input_extrins,
+            #                 tick_input_locs,
+            #                 is_train=True
+            #             )
 
-                #         if prev_encoding_result is None:
-                #             model_output_dict = model.module.forward(
-                #                 current_encoding_result,
-                #                 current_encoding_result,  # 첫 tick은 self
-                #                 bool_prev_pos_encoded=False
-                #             )
-                #         else:
-                #             model_output_dict = model.module.forward(
-                #                 current_encoding_result,
-                #                 prev_encoding_result,
-                #                 bool_prev_pos_encoded=True
-                #             )            
+            #             if prev_encoding_result is None:
+            #                 model_output_dict = model.module.forward(
+            #                     current_encoding_result,
+            #                     current_encoding_result,  # 첫 tick은 self
+            #                     bool_prev_pos_encoded=False
+            #                 )
+            #             else:
+            #                 model_output_dict = model.module.forward(
+            #                     current_encoding_result,
+            #                     prev_encoding_result,
+            #                     bool_prev_pos_encoded=True
+            #                 )            
                         
-                #         ## 이전에는 tick별 처리로 batch_data로 처리하였지만, 현재는 scenario_batch로 처리하기 떄문에
-                #         ## vanila_seg_loss를 위한 임시 dictionary를 생성해줘야함
-                #         gt_tick = {
-                #             'gt_static' : scenario_batch['ego']['gt_static'][tick_idx].to(device)
-                #             'gt_dynamic' : scenario_batch['ego']['gt_dynamic'][tick_idx].to(device)
-                #         }
+            #             ## 이전에는 tick별 처리로 batch_data로 처리하였지만, 현재는 scenario_batch로 처리하기 떄문에
+            #             ## vanila_seg_loss를 위한 임시 dictionary를 생성해줘야함
+            #             gt_tick = {
+            #                 'gt_static' : scenario_batch['ego']['gt_static'][tick_idx].to(device),
+            #                 'gt_dynamic' : scenario_batch['ego']['gt_dynamic'][tick_idx].to(device)
+            #             }
                         
-                #         final_loss = criterion(model_output_dict, gt_tick)
-                #         # print(final_loss)
+            #             final_loss = criterion(model_output_dict, gt_tick)
+            #             print(f"Scenario id : {scenario_id_check} || timestamp : {scenario_batch['ego']['timestamp_key'][tick_idx].squeeze().tolist()[0]} || Total Loss : {final_loss}")
 
         #         prev_encoding_result = current_encoding_result 
                     
@@ -268,16 +269,13 @@ def main():
         #             scaler.update()
         #         # print('--------------------------------------------------')
 
-        #         scheduler.step_update(global_tick_step)
+        #     scheduler.step_update(1)
+        #     criterion.logging(epoch, i, scenario_id_check,len(train_loader), writer, pbar=pbar2)
+        #     pbar2.update(1)
 
-        #         criterion.logging(epoch, global_tick_step, len(train_loader), writer, pbar=pbar2)
-        #         pbar2.update(1)
+        #     for lr_idx, param_group in enumerate(optimizer.param_groups):
+        #         writer.add_scalar(f'lr_{lr_idx}', param_group["lr"], global_tick_step)
 
-        #         for lr_idx, param_group in enumerate(optimizer.param_groups):
-        #             writer.add_scalar(f'lr_{lr_idx}', param_group["lr"], global_tick_step)
-
-        #         # ✅ tick step 증가!
-        #         global_tick_step += 1
                 
         # if epoch % hypes['train_params']['eval_freq'] == 0:
         #     valid_ave_loss = []
@@ -297,10 +295,10 @@ def main():
                 
         #         for tick_idx in range(encoding_input_images.shape[0]):
                     
-        #             tick_input_images = encoding_input_images[tick_index]
-        #             tick_input_intrins = encoding_input_intrins[tick_index]
-        #             tick_input_extrins = encoding_input_extrins[tick_index]
-        #             tick_input_locs = encoding_input_locs[tick_index]
+        #             tick_input_images = encoding_input_images[tick_idx]
+        #             tick_input_intrins = encoding_input_intrins[tick_idx]
+        #             tick_input_extrins = encoding_input_extrins[tick_idx]
+        #             tick_input_locs = encoding_input_locs[tick_idx]
                     
         #             current_encoding_result = model.module.encoding(
         #             tick_input_images,
@@ -324,7 +322,7 @@ def main():
         #                 )
                     
         #             gt_tick = {
-        #                     'gt_static' : scenario_batch['ego']['gt_static'][tick_idx]
+        #                     'gt_static' : scenario_batch['ego']['gt_static'][tick_idx],
         #                     'inputs': scenario_batch['ego']['inputs'][tick_idx],
         #                     'extrinsic': scenario_batch['ego']['extrinsic'][tick_idx],
         #                     'intrinsic': scenario_batch['ego']['intrinsic'][tick_idx],
@@ -384,7 +382,7 @@ def main():
         #                os.path.join(saved_path,
         #                             'net_epoch%d.pth' % (epoch + 1)))
 
-        # opencood_train_dataset.reinitialize()
+        # opencood_train_dataset.reinitialize()         ## cav 순서가 바뀌어 ego가 바뀌는 상황이 없으므로 reinitialize해줄 필요없음
 
 
 if __name__ == '__main__':

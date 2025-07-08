@@ -81,7 +81,7 @@ class VanillaSegLoss(nn.Module):
 
         return total_loss
 
-    def logging(self, epoch, batch_id, batch_len, writer, pbar=None):
+    def logging(self, epoch, batch_id, scenario_id_check, batch_len, writer, pbar=None):
         """
         Print out  the loss function for current iteration.
 
@@ -102,14 +102,14 @@ class VanillaSegLoss(nn.Module):
         pos_loss = self.loss_dict['pos_loss']
 
         if pbar is None:
-            print("[epoch %d][%d/%d], || Loss: %.4f || static Loss: %.4f"
+            print("[epoch %d][%d/%d], [Scenario Id %d] || Loss: %.4f || static Loss: %.4f"
                 " || Dynamic Loss: %.4f || Position Loss : %.4f" % (
-                    epoch, batch_id + 1, batch_len,
+                    epoch, batch_id + 1, batch_len, scenario_id_check,
                     total_loss.item(), static_loss.item(), dynamic_loss.item(), pos_loss.item()))
         else:
-            pbar.set_description("[epoch %d][%d/%d], || Loss: %.4f || static Loss: %.4f"
+            pbar.set_description("[epoch %d][%d/%d], [Scenario Id %d] || Loss: %.4f || static Loss: %.4f"
                   " || Dynamic Loss: %.4f || Postion Loss : %.4f" % (
-                      epoch, batch_id + 1, batch_len,
+                      epoch, batch_id + 1, batch_len,scenario_id_check,
                       total_loss.item(), static_loss.item(), dynamic_loss.item(), pos_loss.item()))
 
 

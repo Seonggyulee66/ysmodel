@@ -354,7 +354,7 @@ class CamIntermediateFusionDataset(base_camera_dataset.BaseCameraDataset):
             torch.from_numpy(np.stack(gt_static_all_batch)).long()
         gt_dynamic_all_batch = \
             torch.from_numpy(np.stack(gt_dynamic_all_batch)).long()
-
+   
         # (B,max_cav,4,4)
         transformation_matrix_all_batch = \
             torch.from_numpy(np.stack(transformation_matrix_all_batch)).float()

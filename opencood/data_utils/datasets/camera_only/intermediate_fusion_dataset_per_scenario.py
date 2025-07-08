@@ -18,6 +18,7 @@ class CamIntermediateFusionDataset_per_scenario(base_camera_dataset.BaseCameraDa
                                                            validate)
         self.visible = params['train_params']['visible']
         self.scenario_list = self.build_scenario_index()
+
     
     ## 이전과는 다르게 scenario별로 처리하기위해 이전의 tick 기준 __len__을 override
     def __len__(self):
@@ -51,7 +52,7 @@ class CamIntermediateFusionDataset_per_scenario(base_camera_dataset.BaseCameraDa
 
             scenario_data.append(processed_tick)
             
-        print(f"Scenario id ({scenario['scenario_id']}) has been finished")
+        # print(f"Scenario id ({scenario['scenario_id']}) has been finished")
             
         return scenario_data            ## [tick0_dict, tick1_dict, tick2_dict,....]
     
@@ -297,83 +298,74 @@ class CamIntermediateFusionDataset_per_scenario(base_camera_dataset.BaseCameraDa
 
         return selected_cav_processed
 
+    def pad_agents(self,array, max_agents, pad_shape):
+        """
+        array: (N_agents, ...)
+        pad_shape: shape for single agent data e.g. (H, W, C)
+        """
+        N = array.shape[0]
+        if N == max_agents:
+            return array
+        pad_num = max_agents - N
+        dummy = np.zeros((pad_num, *pad_shape), dtype=array.dtype)
+        return np.concatenate([array, dummy], axis=0)
 
     ## 이전 : Dataset에서 tick 단위별 data 처리 || Sampler에서 tick 단위 분배 || Batchsampler에서 batch_size로 묶음 || colllate_fn에서 batch size에 맞게 합쳐서 tensor 생성
     ## 현재 : Dataset에서 scenario 전체 tick 반환 || Sampler에서 scenario index 단위 분배 || BatchSampler 없음 || collate_fn에서 시퀀스 전체를 합침 
     ## 현재 Collate_fn의 역할 : tick들을 순회하면서 동일 field끼리 Concate -> Stack -> Tensor로 만듬  || sequence를 [num_ticks, ...] shape으로 유지해주는 역할을 수행
     def collate_batch(self, batch):
-        """
-        Customized collate function for pytorch dataloader during training
-        for late fusion dataset.
-
-        Parameters
-        ----------
-        batch : dict
-
-        Returns
-        -------
-        batch : dict
-            Reformatted batch.
-        """
-        
-        assert len(batch) == 1      ## scenario base는 batch 사이즈가 1이어야함
-        
-        scenario_sequence = batch[0]    ## batch = [ [tick0_dict, tick1_dict, tick2_dict, ...] ] 이라 [0]을 사용
-        
+        assert len(batch) == 1
+        scenario_sequence = batch[0]
         output_dict = {'ego': {}}
 
         cam_rgb_all_batch = []
         cam_to_ego_all_batch = []
         cam_intrinsic_all_batch = []
-
         gt_static_all_batch = []
         gt_dynamic_all_batch = []
-
         transformation_matrix_all_batch = []
         pairwise_t_matrix_all_batch = []
-        # used to save each scenario's agent number
         record_len = []
         senario_id_all_batch = []
         agent_true_loc_all_batch = []
         cav_list_all_batch = []
-        distance_all_batch = []
         single_bev_all_batch = []
         timestamp_all_batch = []
-        
+
+        MAX_AGENTS = 5   # ✅ 여기서 max_agents 고정
+
         for tick_dict in scenario_sequence:
             ego_dict = tick_dict['ego']
-            
+
             camera_data = ego_dict['camera_data']
             camera_intrinsic = ego_dict['camera_intrinsic']
             camera_extrinsic = ego_dict['camera_extrinsic']
+            agent_true_loc = ego_dict['agent_true_loc']
 
-            assert camera_data.shape[0] == \
-                   camera_intrinsic.shape[0] == \
-                   camera_extrinsic.shape[0]
+            current_agents = camera_data.shape[0]
+            record_len.append(current_agents)
 
-            record_len.append(camera_data.shape[0])
+            # ✅ padding
+            cam_data_padded = self.pad_agents(camera_data, MAX_AGENTS, camera_data.shape[1:])       ## ex) cam_data_padded : (5, 4, 512, 512, 3)
+            cam_intrinsic_padded = self.pad_agents(camera_intrinsic, MAX_AGENTS, camera_intrinsic.shape[1:])
+            cam_extrinsic_padded = self.pad_agents(camera_extrinsic, MAX_AGENTS, camera_extrinsic.shape[1:])
+            agent_true_loc_padded = self.pad_agents(agent_true_loc, MAX_AGENTS, agent_true_loc.shape[1:])
 
-            cam_rgb_all_batch.append(camera_data)
-            cam_intrinsic_all_batch.append(camera_intrinsic)
-            cam_to_ego_all_batch.append(camera_extrinsic)
+            cam_rgb_all_batch.append(cam_data_padded)
+            cam_intrinsic_all_batch.append(cam_intrinsic_padded)
+            cam_to_ego_all_batch.append(cam_extrinsic_padded)
+            agent_true_loc_all_batch.append(agent_true_loc_padded)
 
-            # ground truth
-            gt_dynamic_all_batch.append(ego_dict['gt_dynamic'])
+            # 그대로
             gt_static_all_batch.append(ego_dict['gt_static'])
-
-            # transformation matrix
-            transformation_matrix_all_batch.append(
-                ego_dict['transformation_matrix'])
+            gt_dynamic_all_batch.append(ego_dict['gt_dynamic'])
+            transformation_matrix_all_batch.append(ego_dict['transformation_matrix'])
             senario_id_all_batch.append(ego_dict['scenario_id'][0])
-            agent_true_loc_all_batch.append(ego_dict['agent_true_loc'])
             cav_list_all_batch.append(ego_dict['cav_list'])
-            # distance_all_batch.append(ego_dict['dist_to_ego'])
             single_bev_all_batch.append(ego_dict['single_bev_imgae'])
             timestamp_all_batch.append(ego_dict['timestamp_key'])
-            # pairwise matrix
             pairwise_t_matrix_all_batch.append(ego_dict['pairwise_t_matrix'])
-            
-        # (num_ticks, L, 1, M, H, W, C)
+
         cam_rgb_all_batch = torch.from_numpy(
             np.stack(cam_rgb_all_batch, axis=0)).unsqueeze(2).float()
         cam_intrinsic_all_batch = torch.from_numpy(
@@ -386,27 +378,19 @@ class CamIntermediateFusionDataset_per_scenario(base_camera_dataset.BaseCameraDa
             np.stack(single_bev_all_batch, axis=0)).unsqueeze(2).float()
         timestamp_all_batch = torch.from_numpy(
             np.stack(timestamp_all_batch, axis=0)).unsqueeze(2).float()
-        
-        # (num_ticks,)
+
         record_len = torch.from_numpy(np.array(record_len, dtype=int))
+        gt_static_all_batch = torch.from_numpy(
+            np.stack(gt_static_all_batch)).unsqueeze(1).long()
+        gt_dynamic_all_batch = torch.from_numpy(
+            np.stack(gt_dynamic_all_batch)).unsqueeze(1).long()
+        transformation_matrix_all_batch = torch.from_numpy(
+            np.stack(transformation_matrix_all_batch)).float()
+        pairwise_t_matrix_all_batch = torch.from_numpy(
+            np.stack(pairwise_t_matrix_all_batch)).float()
+        senario_id_all_batch = torch.from_numpy(
+            np.stack(senario_id_all_batch)).float()
 
-        # (num_ticks, 1, H, W)
-        gt_static_all_batch = \
-            torch.from_numpy(np.stack(gt_static_all_batch)).long()
-        gt_dynamic_all_batch = \
-            torch.from_numpy(np.stack(gt_dynamic_all_batch)).long()
-
-        # (num_ticks,max_cav,4,4)
-        transformation_matrix_all_batch = \
-            torch.from_numpy(np.stack(transformation_matrix_all_batch)).float()
-        pairwise_t_matrix_all_batch = \
-            torch.from_numpy(np.stack(pairwise_t_matrix_all_batch)).float()
-        senario_id_all_batch = \
-            torch.from_numpy(np.stack(senario_id_all_batch)).float()
-        # distance_all_batch = \
-        #     torch.from_numpy(np.stack(distance_all_batch)).float()
-        
-        # convert numpy arrays to torch tensor
         output_dict['ego'].update({
             'inputs': cam_rgb_all_batch,
             'extrinsic': cam_to_ego_all_batch,
@@ -417,11 +401,10 @@ class CamIntermediateFusionDataset_per_scenario(base_camera_dataset.BaseCameraDa
             'pairwise_t_matrix': pairwise_t_matrix_all_batch,
             'record_len': record_len,
             'scenario_id': senario_id_all_batch,
-            'agent_true_loc' : agent_true_loc_all_batch,
-            'cav_list' : cav_list_all_batch,
-            # 'dist_to_ego' : distance_all_batch,
-            'single_bev' : single_bev_all_batch,
-            'timestamp_key' : timestamp_all_batch
+            'agent_true_loc': agent_true_loc_all_batch,
+            'cav_list': cav_list_all_batch,
+            'single_bev': single_bev_all_batch,
+            'timestamp_key': timestamp_all_batch
         })
 
         return output_dict
