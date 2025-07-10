@@ -66,10 +66,25 @@ class VanillaSegLoss(nn.Module):
             static_loss = self.loss_func_static(static_pred, static_gt)
 
         else:
+            # dynamic_pred = rearrange(dynamic_pred, 'b l c h w -> (b l) c h w')
+            # dynamic_loss = self.loss_func_dynamic(dynamic_pred, dynamic_gt)
+            # static_pred = rearrange(static_pred, 'b l c h w -> (b l) c h w')
+            # static_loss = self.loss_func_static(static_pred, static_gt)
+            pos_loss = output_dict['pos_loss'][0]
+            assert torch.isfinite(pos_loss).all(), f"pos_loss: {pos_loss}"
+
             dynamic_pred = rearrange(dynamic_pred, 'b l c h w -> (b l) c h w')
-            dynamic_loss = self.loss_func_dynamic(dynamic_pred, dynamic_gt)
+            dynamic_pred = dynamic_pred.float()
             static_pred = rearrange(static_pred, 'b l c h w -> (b l) c h w')
+            static_pred = static_pred.float()
+            
+            # print("Before loss_func_dynamic")
+            dynamic_loss = self.loss_func_dynamic(dynamic_pred, dynamic_gt)
+            assert torch.isfinite(dynamic_loss).all(), f"dynamic_loss: {dynamic_loss}, dynamic_pred {dynamic_pred}, dynamic_gt {dynamic_gt}"
+
+            # print("Before loss_func_static")
             static_loss = self.loss_func_static(static_pred, static_gt)
+            assert torch.isfinite(static_loss).all(), f"static_loss: {static_loss}"
 
         pos_loss = output_dict['pos_loss'][0]
         
@@ -81,7 +96,7 @@ class VanillaSegLoss(nn.Module):
 
         return total_loss
 
-    def logging(self, epoch, batch_id, scenario_id_check, batch_len, writer, pbar=None):
+    def logging(self, epoch, batch_id, scenario_id_check, batch_len, writer, pbar=None, rank=0):
         """
         Print out  the loss function for current iteration.
 
@@ -100,25 +115,25 @@ class VanillaSegLoss(nn.Module):
         static_loss = self.loss_dict['static_loss']
         dynamic_loss = self.loss_dict['dynamic_loss']
         pos_loss = self.loss_dict['pos_loss']
+        if rank == 0:
+            if pbar is None:
+                print("[epoch %d][%d/%d], [Scenario Id %d] || Loss: %.4f || static Loss: %.4f"
+                    " || Dynamic Loss: %.4f || Position Loss : %.4f" % (
+                        epoch, batch_id + 1, batch_len, scenario_id_check,
+                        total_loss.item(), static_loss.item(), dynamic_loss.item(), pos_loss.item()))
+            else:
+                pbar.set_description("[epoch %d][%d/%d], [Scenario Id %d] || Loss: %.4f || static Loss: %.4f"
+                    " || Dynamic Loss: %.4f || Postion Loss : %.4f" % (
+                        epoch, batch_id + 1, batch_len,scenario_id_check,
+                        total_loss.item(), static_loss.item(), dynamic_loss.item(), pos_loss.item()))
 
-        if pbar is None:
-            print("[epoch %d][%d/%d], [Scenario Id %d] || Loss: %.4f || static Loss: %.4f"
-                " || Dynamic Loss: %.4f || Position Loss : %.4f" % (
-                    epoch, batch_id + 1, batch_len, scenario_id_check,
-                    total_loss.item(), static_loss.item(), dynamic_loss.item(), pos_loss.item()))
-        else:
-            pbar.set_description("[epoch %d][%d/%d], [Scenario Id %d] || Loss: %.4f || static Loss: %.4f"
-                  " || Dynamic Loss: %.4f || Postion Loss : %.4f" % (
-                      epoch, batch_id + 1, batch_len,scenario_id_check,
-                      total_loss.item(), static_loss.item(), dynamic_loss.item(), pos_loss.item()))
 
-
-        writer.add_scalar('Static_loss', static_loss.item(),
-                          epoch*batch_len + batch_id)
-        writer.add_scalar('Dynamic_loss', dynamic_loss.item(),
-                          epoch*batch_len + batch_id)
-        writer.add_scalar('Position_loss', pos_loss.item(),
-                          epoch*batch_len + batch_id)
+            writer.add_scalar('Static_loss', static_loss.item(),
+                            epoch*batch_len + batch_id)
+            writer.add_scalar('Dynamic_loss', dynamic_loss.item(),
+                            epoch*batch_len + batch_id)
+            writer.add_scalar('Position_loss', pos_loss.item(),
+                            epoch*batch_len + batch_id)
 
 
 

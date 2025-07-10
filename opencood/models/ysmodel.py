@@ -413,7 +413,12 @@ class LSS(nn.Module):
 
         points = torch.cat((points[:, :, :, :, :, :2] * points[:, :, :, :, :, 2:3], points[:, :, :, :, :, 2:3]), 5)
         # form transformation matrix from camera to ego
-        combine = rots.matmul(torch.inverse(intrins))
+        det = torch.det(intrins)
+        if torch.any(det==0):
+            combine = rots.matmul(torch.linalg.pinv(intrins))
+        else:
+            combine = rots.matmul(torch.inverse(intrins))
+            
         points = combine.view(B, N, 1, 1, 1, 3, 3).matmul(points).squeeze(-1)
         # get the final (x,y,z) locations in the ego frame
         points += trans.view(B, N, 1, 1, 1, 3)
@@ -506,7 +511,7 @@ class LSS(nn.Module):
     
     def forward(self, x, rots, trans, intrins, post_rots, post_trans, extrinsic):
         """
-        x:          (B,  Ncam,    C, H, W)
+        x:          (N_agents ,B,  Ncam,    C, H, W)
         rots:       (B,  Ncam, 3, 3)
         trans:      (B,  Ncam,   3)
         intrins:    (B,  Ncam, 3, 3)
@@ -698,16 +703,20 @@ def Encoding(img_inputs, intrinsics, extrinsics, data_aug_conf, grid_conf, is_tr
         all_post_rots.append(torch.stack(post_rots))
         all_post_trans.append(torch.stack(post_trans))
 
-
+    valid_mask = (img_inputs.abs().sum(dim=[2,3,4,5]) > 0.).float().to(device)
     encoding_model = LSS(grid_conf, data_aug_conf).to(device)
+    
+    encoded_bev, vis_encoded_bev = encoding_model(
+        torch.stack(all_imgs).to(device), 
+        torch.stack(all_rots).to(device),
+        torch.stack(all_trans).to(device),
+        torch.stack(all_intrins).to(device),
+        torch.stack(all_post_rots).to(device),
+        torch.stack(all_post_trans).to(device),
+        extrinsics.to(device)
+    )
 
-    return encoding_model(torch.stack(all_imgs).to(device), 
-                          torch.stack(all_rots).to(device),
-                          torch.stack(all_trans).to(device),
-                            torch.stack(all_intrins).to(device),
-                            torch.stack(all_post_rots).to(device),
-                            torch.stack(all_post_trans).to(device),
-                            extrinsics.to(device))
+    return encoded_bev, vis_encoded_bev, valid_mask
 
 # 간단한 BEV 시각화 함수
 def visualize_bev(bev_feat, title='BEV', save=False):
@@ -778,7 +787,7 @@ def warp_and_paste_into_large_bev(canvas, bev_feat, dx, dy, dyaw, voxel_size=0.5
     return canvas
 
 # 전체 large BEV 생성
-def get_large_bev(data_aug_conf, encoded_bev,vis_encoded_bev, positions, H_big=400, W_big=400, save_vis = False):
+def get_large_bev(data_aug_conf, encoded_bev,vis_encoded_bev, positions,valid_mask, H_big=400, W_big=400, save_vis = False):
     """
     encoded_bev shape : (agent_num, Batch, channel, small_H, small_W)
     position shape : (agent_num, Batch, 6) || 6 : [x,y,z,...]
@@ -796,6 +805,8 @@ def get_large_bev(data_aug_conf, encoded_bev,vis_encoded_bev, positions, H_big=4
     ego_pose = positions[0][0]
     
     for i in range(N):
+        if valid_mask[i][0] == 0:       ### dummy encoding result 예외 처리
+            continue
         each_agent_bev_feats = encoded_bev[i].squeeze(0)        ## each_agent_bev_feats shape :  (C, small_H, small_W)
         dx, dy, dyaw = get_relative_pose(ego_pose, positions[0][i])
         
@@ -1190,6 +1201,8 @@ class BevSegHead(nn.Module):
                                          static_output_class,
                                          kernel_size=3,
                                          padding=1)
+            self.dynamic_head = self.dynamic_head.float()
+            self.static_head = self.static_head.float()
 
     def forward(self,  x, b, l):
         if self.target == 'dynamic':
@@ -1207,12 +1220,16 @@ class BevSegHead(nn.Module):
                                            device=static_map.device)
 
         else:
-            dynamic_map = self.dynamic_head(x)
-            dynamic_map = rearrange(dynamic_map, '(b l) c h w -> b l c h w',
+            with torch.cuda.amp.autocast(enabled=False):
+                x = x.float()
+                dynamic_map = self.dynamic_head(x)
+                dynamic_map = rearrange(dynamic_map, '(b l) c h w -> b l c h w',
+                                        b=b, l=l)
+                assert torch.isfinite(dynamic_map).all(), f"NaN in dynamic_pred before loss!"
+                
+                static_map = self.static_head(x)
+                static_map = rearrange(static_map, '(b l) c h w -> b l c h w',
                                     b=b, l=l)
-            static_map = self.static_head(x)
-            static_map = rearrange(static_map, '(b l) c h w -> b l c h w',
-                                   b=b, l=l)
 
         output_dict = {'static_seg': static_map,
                        'dynamic_seg': dynamic_map}
@@ -1244,11 +1261,10 @@ class Mini_cooper(nn.Module):
     ############ ENCODER 최종 불러오는 곳
     ############################################################################################
     def encoding(self, images, intrins, extrins, positions, is_train=True):
-        encoded_bev, vis_encoded_bev = Encoding(images, intrins, extrins, self.data_aug_conf, self.grid_conf, is_train)
-        # print("ENCODED BEV SHAPE OF MULTI_AGENTS", encoded_bev.shape)     ## (3, 1, 64, 200, 200)
-
+        encoded_bev, vis_encoded_bev, valid_mask = Encoding(images, intrins, extrins, self.data_aug_conf, self.grid_conf, is_train)
+        # print("ENCODED BEV SHAPE OF MULTI_AGENTS", encoded_bev.shape)     ## (max_padded_cavs(5), 1, 64, 200, 200)
         ##          64 channel Case (For Training)
-        mapped_bev= get_large_bev(self.data_aug_conf, encoded_bev,vis_encoded_bev, positions,save_vis = False)
+        mapped_bev= get_large_bev(self.data_aug_conf, encoded_bev,vis_encoded_bev, positions, valid_mask, save_vis = False)
 
         # print("LARGE BEV:::: ", mapped_bev, mapped_bev.shape)
         return mapped_bev    ## true_poas (x,y,yaw) 3차원으로 나옴

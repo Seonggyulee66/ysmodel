@@ -17,44 +17,39 @@ class CamIntermediateFusionDataset_per_scenario(base_camera_dataset.BaseCameraDa
                                                            train,
                                                            validate)
         self.visible = params['train_params']['visible']
-        self.scenario_list = self.build_scenario_index()
+        self.chunk_size = 30
+        self.chunk_index_list = self.build_chunk_index()
 
     
     ## 이전과는 다르게 scenario별로 처리하기위해 이전의 tick 기준 __len__을 override
     def __len__(self):
-        return len(self.scenario_list)
+        return len(self.chunk_index_list)
         
-    def build_scenario_index(self):
-        scenario_list = []
+    def build_chunk_index(self):
+        chunk_index_list = []
         for scenario_id in self.scenario_idx_list:
-            timestamps_list = self.get_tick_indices_for_scenario(scenario_id)    ## ['000069', '000071', '000073', '000075',,,,,]
-            scenario_list.append({
-                'scenario_id' : scenario_id,
-                'timestamps_list' : timestamps_list,
-                'tick_indices' : range(len(timestamps_list))
-            })
-        return scenario_list
+            timestamps = self.get_tick_indices_for_scenario(scenario_id)
+            for i in range(0, len(timestamps), self.chunk_size):
+                chunk_index_list.append({
+                    'scenario_id': scenario_id,
+                    'start_tick': i,
+                    'end_tick': min(i + self.chunk_size, len(timestamps))
+                })
+        return chunk_index_list
         
     def __getitem__(self, idx):
-        
-        scenario = self.scenario_list[idx]
-        scenario_id = scenario['scenario_id']           ## [0,1,2,3,4,,,,]
-        timestamps_list = scenario['timestamps_list']   ## ['000069', '000071', '000073', '000075',,,,,]
-        tick_indices = scenario['tick_indices']         ## range [0,1,2,3,4,5,,,,,]
-        
+        chunk_info = self.chunk_index_list[idx]
+        scenario_id = chunk_info['scenario_id']
+        tick_range = range(chunk_info['start_tick'], chunk_info['end_tick'])
+
         scenario_data = []
-        for tick_idx in tick_indices:
-            data_sample = self.get_sample_random(
-                (scenario_id, tick_idx)
-                )       ## data_sample: odict_keys(['659', '641', '650'])
-
-            processed_tick = self.process_single_tick(data_sample)  ## data_sample에 있는 
-
+        for tick_idx in tick_range:
+            # 기존 get_sample_random() 호출
+            data_sample = self.get_sample_random((scenario_id, tick_idx))
+            processed_tick = self.process_single_tick(data_sample)
             scenario_data.append(processed_tick)
-            
-        # print(f"Scenario id ({scenario['scenario_id']}) has been finished")
-            
-        return scenario_data            ## [tick0_dict, tick1_dict, tick2_dict,....]
+        
+        return scenario_data
     
     def process_single_tick(self,data_sample):
         cav_list = list(data_sample.keys())
@@ -350,11 +345,15 @@ class CamIntermediateFusionDataset_per_scenario(base_camera_dataset.BaseCameraDa
             cam_intrinsic_padded = self.pad_agents(camera_intrinsic, MAX_AGENTS, camera_intrinsic.shape[1:])
             cam_extrinsic_padded = self.pad_agents(camera_extrinsic, MAX_AGENTS, camera_extrinsic.shape[1:])
             agent_true_loc_padded = self.pad_agents(agent_true_loc, MAX_AGENTS, agent_true_loc.shape[1:])
+            single_bev_padded = self.pad_agents(ego_dict['single_bev_imgae'],MAX_AGENTS, ego_dict['single_bev_imgae'].shape[1:])
+            timestamp_padded = self.pad_agents(ego_dict['timestamp_key'],MAX_AGENTS, ego_dict['timestamp_key'].shape[1:])
 
             cam_rgb_all_batch.append(cam_data_padded)
             cam_intrinsic_all_batch.append(cam_intrinsic_padded)
             cam_to_ego_all_batch.append(cam_extrinsic_padded)
             agent_true_loc_all_batch.append(agent_true_loc_padded)
+            single_bev_all_batch.append(single_bev_padded)
+            timestamp_all_batch.append(timestamp_padded)
 
             # 그대로
             gt_static_all_batch.append(ego_dict['gt_static'])
@@ -362,8 +361,6 @@ class CamIntermediateFusionDataset_per_scenario(base_camera_dataset.BaseCameraDa
             transformation_matrix_all_batch.append(ego_dict['transformation_matrix'])
             senario_id_all_batch.append(ego_dict['scenario_id'][0])
             cav_list_all_batch.append(ego_dict['cav_list'])
-            single_bev_all_batch.append(ego_dict['single_bev_imgae'])
-            timestamp_all_batch.append(ego_dict['timestamp_key'])
             pairwise_t_matrix_all_batch.append(ego_dict['pairwise_t_matrix'])
 
         cam_rgb_all_batch = torch.from_numpy(
@@ -377,7 +374,7 @@ class CamIntermediateFusionDataset_per_scenario(base_camera_dataset.BaseCameraDa
         single_bev_all_batch = torch.from_numpy(
             np.stack(single_bev_all_batch, axis=0)).unsqueeze(2).float()
         timestamp_all_batch = torch.from_numpy(
-            np.stack(timestamp_all_batch, axis=0)).unsqueeze(2).float()
+            np.stack(timestamp_all_batch, axis=0)).unsqueeze(2).float()     ## ex) tensor([[[368.],[368.], [  0.],[  0.],[  0.]]])
 
         record_len = torch.from_numpy(np.array(record_len, dtype=int))
         gt_static_all_batch = torch.from_numpy(
@@ -390,6 +387,7 @@ class CamIntermediateFusionDataset_per_scenario(base_camera_dataset.BaseCameraDa
             np.stack(pairwise_t_matrix_all_batch)).float()
         senario_id_all_batch = torch.from_numpy(
             np.stack(senario_id_all_batch)).float()
+        
 
         output_dict['ego'].update({
             'inputs': cam_rgb_all_batch,
