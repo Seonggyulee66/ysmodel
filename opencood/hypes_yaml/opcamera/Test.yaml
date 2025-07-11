@@ -6,8 +6,8 @@ validate_dir: './small_train'
 train_params:
   batch_size: &batch_size 1
   epoches: &epoches 100
-  eval_freq: 1
-  save_freq: 1
+  eval_freq: 10
+  save_freq: 10
   max_cav: &max_cav 7
   visible: False
 

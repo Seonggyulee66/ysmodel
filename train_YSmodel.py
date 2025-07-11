@@ -362,7 +362,7 @@ def main():
                             'intrinsic': scenario_batch['ego']['intrinsic'][tick_idx],
                             'gt_static': scenario_batch['ego']['gt_static'][tick_idx],
                             'gt_dynamic': scenario_batch['ego']['gt_dynamic'][tick_idx],
-                            'transformation_matrix': scenario_batch['ego']['trainsformation_matrix'][tick_idx],
+                            'transformation_matrix': scenario_batch['ego']['transformation_matrix'][tick_idx],
                             'pairwise_t_matrix': scenario_batch['ego']['pairwise_t_matrix'][tick_idx],
                             'record_len': scenario_batch['ego']['record_len'][tick_idx],
                             'scenario_id': scenario_batch['ego']['scenario_id'][tick_idx],
