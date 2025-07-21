@@ -129,7 +129,7 @@ def cal_iou_training(batch_dict, output_dict):
     The iou for static and dynamic bev map.
     """
 
-    batch_size = batch_dict['ego']['gt_static'].shape[0]
+    batch_size = batch_dict['ego']['gt_static'].shape[1]
 
     for i in range(batch_size):
 
@@ -138,7 +138,7 @@ def cal_iou_training(batch_dict, output_dict):
         # gt_static = np.array(gt_static, dtype=np.int)
 
         gt_dynamic = \
-            batch_dict['ego']['gt_dynamic'].detach().cpu().data.numpy()[i, 0]
+            batch_dict['ego']['gt_dynamic'].detach().cpu().data.numpy()[0, i, 0]
         gt_dynamic = np.array(gt_dynamic, dtype=np.int32)
 
         # pred_static = \

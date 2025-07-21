@@ -11,7 +11,7 @@ import opencood.hypes_yaml.yaml_utils as yaml_utils
 from opencood.data_utils.datasets import build_dataset
 
 # ---------------------------- 설정 ----------------------------
-data_dir = './train'
+data_dir = '/scratch/sglee6/opv2v_dataset/train'
 yaml_root = './opencood/hypes_yaml/opcamera/Test.yaml'
 image_types_list = ['bev_dynamic.png', 'bev_static.png', 'bev_lane.png', 'bev_visibility.png', 'bev_visibility_corp.png']
 # image_types_list = ['bev_lane.png']
@@ -145,3 +145,5 @@ print(f"Working CPU 코어 수: {cpu_count()-4}")
 
 with Pool(processes=max(1, cpu_count() - 4)) as pool:
     pool.map(process_one_tick, task_list)
+    
+print("All work is done")

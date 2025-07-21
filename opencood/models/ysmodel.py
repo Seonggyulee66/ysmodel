@@ -827,12 +827,12 @@ def get_large_bev(data_aug_conf, encoded_bev,vis_encoded_bev, positions,valid_ma
 ###################### DECODER ############################################
 ###########################################################################
 class Scale(nn.Module):
-    def __init__(self,scale):
+    def __init__(self, scale):
         super().__init__()
-        self.scale = scale
+        self.register_buffer("scale", torch.tensor(scale, dtype=torch.float32))
 
     def forward(self, x):
-        return x * self.scale
+        return x * self.scale  # ✔️ now tracked
 
 class PatchEmbed(nn.Module):
     def __init__(self, img_size=400, patch_size=16, in_channels=64, embed_dim=64):
@@ -862,104 +862,109 @@ class UpBlock(nn.Module):
         x = self.norm(x)
         return self.act(x)
 
-# class PatchDecoder(nn.Module):
-#     def __init__(self, emb_dim, out_dim=64):
-#         super().__init__()
-#         # 입력 채널 줄이기: 64 -> 32
-#         self.initial_conv = nn.Sequential(
-#             nn.Conv2d(emb_dim, 32, kernel_size=3, padding=1),
-#             nn.GroupNorm(4, 32),
-#             nn.LeakyReLU(0.1, inplace=True)
-#         )
-
-#         self.up1 = UpBlock(32, 24)     # 64x64
-#         self.up2 = UpBlock(24, 16)     # 128x128
-#         self.up3 = UpBlock(16, 12)     # 256x256
-#         self.up4 = UpBlock(12, out_dim)  # 512x512
-
-#     def forward(self, x):
-#         B, N, C = x.shape
-#         H = W = int(N ** 0.5)
-#         assert H * W == N, "Input must be square number of patches"
-
-#         x = x.transpose(1, 2).reshape(B, C, H, W)
-#         x = self.initial_conv(x)
-#         x = self.up1(x, (64, 64))
-#         x = self.up2(x, (128, 128))
-#         x = self.up3(x, (256, 256))
-#         x = self.up4(x, (512, 512))
-#         return x
-
-################################################################################################################################
-#                                       Decoder Version 2 - U-net
-# ################################################################################################################################
-class ConvBlock(nn.Module):
-    def __init__(self, in_channels, out_channels):
+class PatchDecoder(nn.Module):
+    def __init__(self, emb_dim, out_dim=64):
         super().__init__()
-        self.block = nn.Sequential(
-            nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1),
-            nn.ReLU(inplace=True)
+        # 입력 채널 줄이기: 64 -> 32
+        self.initial_conv = nn.Sequential(
+            nn.Conv2d(emb_dim, 32, kernel_size=3, padding=1),
+            nn.GroupNorm(4, 32),
+            nn.LeakyReLU(0.1, inplace=True)
         )
 
-    def forward(self, x):
-        return self.block(x)
-
-class PatchDecoder(nn.Module):
-    def __init__(self, emb_dim=64):
-        super().__init__()
-        self.input_proj = nn.Conv2d(emb_dim, emb_dim, kernel_size=3, padding=1)
-        
-        # Encoder
-        self.enc1 = ConvBlock(emb_dim, 128)
-        self.down1 = nn.Conv2d(128, 128, kernel_size=3, stride=2, padding=1)
-
-        self.enc2 = ConvBlock(128, 256)
-        self.down2 = nn.Conv2d(256, 256, kernel_size=3, stride=2, padding=1)
-
-        self.enc3 = ConvBlock(256, 512)
-
-        # Decoder
-        self.up2 = nn.ConvTranspose2d(512, 256, kernel_size=2, stride=2)
-        self.dec2 = ConvBlock(512, 256)
-
-        self.up1 = nn.ConvTranspose2d(256, 128, kernel_size=2, stride=2)
-        self.dec1 = ConvBlock(256, 128)
-
-        self.up0 = nn.ConvTranspose2d(128, 64, kernel_size=2, stride=2)
-        self.final_conv = nn.Conv2d(64, emb_dim, kernel_size=3, padding=1)
+        self.up1 = UpBlock(32, 24)     # 64x64
+        self.up2 = UpBlock(24, 16)     # 128x128
+        self.up3 = UpBlock(16, 12)     # 256x256
+        self.up4 = UpBlock(12, out_dim)  # 512x512
 
     def forward(self, x):
         B, N, C = x.shape
         H = W = int(N ** 0.5)
-        assert H * W == N, "N must be a perfect square"
+        assert H * W == N, "Input must be square number of patches"
 
-        x = x.transpose(1, 2).reshape(B, C, H, W)  # [B, 64, 25, 25]
-        x = self.input_proj(x)                    # [B, 64, 25, 25]
+        x = x.transpose(1, 2).reshape(B, C, H, W)
+        x = self.initial_conv(x)
+        x = self.up1(x, (64, 64))
+        x = self.up2(x, (128, 128))
+        x = self.up3(x, (256, 256))
+        x = self.up4(x, (512, 512))
+        return x
 
-        x1 = self.enc1(x)                         # [B, 128, 25, 25]
-        x1_down = self.down1(x1)                  # [B, 128, 13, 13]
+################################################################################################################################
+#                                       Decoder Version 2 - U-net
+# ################################################################################################################################
+# class ConvBlock(nn.Module):
+#     def __init__(self, in_channels, out_channels):
+#         super().__init__()
+#         self.block = nn.Sequential(
+#             nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1),
+#             nn.GroupNorm(4, out_channels, eps=1e-5),   # 🔑 std=0 방지 eps
+#             nn.ReLU(inplace=True),
+#             nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1),
+#             nn.GroupNorm(4, out_channels, eps=1e-5),   # 🔑
+#             nn.ReLU(inplace=True)
+#         )
+        
 
-        x2 = self.enc2(x1_down)                   # [B, 256, 13, 13]
-        x2_down = self.down2(x2)                  # [B, 256, 7, 7]
+#     def forward(self, x):
+#         return self.block(x)
 
-        x3 = self.enc3(x2_down)                   # [B, 512, 7, 7]
+# class PatchDecoder(nn.Module):
+#     def __init__(self, emb_dim=64):
+#         super().__init__()
+#         self.input_proj = nn.Conv2d(emb_dim, emb_dim, kernel_size=3, padding=1)
+        
+#         # Encoder
+#         self.enc1 = ConvBlock(emb_dim, 128)
+#         self.down1 = nn.Conv2d(128, 128, kernel_size=3, stride=2, padding=1)
 
-        d2 = self.up2(x3)                         # [B, 256, 14, 14]
-        x2 = F.interpolate(x2, size=d2.shape[-2:], mode='bilinear', align_corners=False)
-        d2 = self.dec2(torch.cat([d2, x2], dim=1))  # [B, 256, 14, 14]
+#         self.enc2 = ConvBlock(128, 256)
+#         self.down2 = nn.Conv2d(256, 256, kernel_size=3, stride=2, padding=1)
 
-        d1 = self.up1(d2)                         # [B, 128, 28, 28]
-        x1 = F.interpolate(x1, size=d1.shape[-2:], mode='bilinear', align_corners=False)
-        d1 = self.dec1(torch.cat([d1, x1], dim=1))  # [B, 128, 28, 28]
+#         self.enc3 = ConvBlock(256, 512)
 
-        d0 = self.up0(d1)                         # [B, 64, 56, 56]
+#         # Decoder
+#         self.up2 = nn.ConvTranspose2d(512, 256, kernel_size=2, stride=2)
+#         self.dec2 = ConvBlock(512, 256)
 
-        out = F.interpolate(d0, size=(512, 512), mode='bilinear', align_corners=False)
-        out = self.final_conv(out)               # [B, 64, 512, 512]
+#         self.up1 = nn.ConvTranspose2d(256, 128, kernel_size=2, stride=2)
+#         self.dec1 = ConvBlock(256, 128)
 
-        return out
+#         self.up0 = nn.ConvTranspose2d(128, 64, kernel_size=2, stride=2)
+#         self.final_conv = nn.Conv2d(64, emb_dim, kernel_size=3, padding=1)
+#         self.out_relu = nn.ReLU()
+
+#     def forward(self, x):
+#         B, N, C = x.shape
+#         H = W = int(N ** 0.5)
+#         assert H * W == N, "N must be a perfect square"
+
+#         x = x.transpose(1, 2).reshape(B, C, H, W)  # [B, 64, 25, 25]
+#         x = self.input_proj(x)                    # [B, 64, 25, 25]
+
+#         x1 = self.enc1(x)                         # [B, 128, 25, 25]
+#         x1_down = self.down1(x1)                  # [B, 128, 13, 13]
+
+#         x2 = self.enc2(x1_down)                   # [B, 256, 13, 13]
+#         x2_down = self.down2(x2)                  # [B, 256, 7, 7]
+
+#         x3 = self.enc3(x2_down)                   # [B, 512, 7, 7]
+
+#         d2 = self.up2(x3)                         # [B, 256, 14, 14]
+#         x2 = F.interpolate(x2, size=d2.shape[-2:], mode='bilinear', align_corners=False)
+#         d2 = self.dec2(torch.cat([d2, x2], dim=1))  # [B, 256, 14, 14]
+
+#         d1 = self.up1(d2)                         # [B, 128, 28, 28]
+#         x1 = F.interpolate(x1, size=d1.shape[-2:], mode='bilinear', align_corners=False)
+#         d1 = self.dec1(torch.cat([d1, x1], dim=1))  # [B, 128, 28, 28]
+
+#         d0 = self.up0(d1)                         # [B, 64, 56, 56]
+
+#         out = F.interpolate(d0, size=(512, 512), mode='bilinear', align_corners=False)
+#         out = self.final_conv(out)               # [B, 64, 512, 512]
+#         out = self.out_relu(out)
+        
+#         return out
 
 
 ################################################################################################################################
@@ -1019,13 +1024,17 @@ class FeedforwardBlock(nn.Module):
     
 # Residual Connection
 class ResidualConnection(nn.Module):
-    def __init__(self, dropout : float) -> None:
+    def __init__(self, dropout, normalized_shape):
         super().__init__()
         self.dropout = nn.Dropout(dropout)
-        self.norm = LayerNormalization()
+        self.norm = nn.LayerNorm(normalized_shape=normalized_shape)  # 실제 shape 지정 필요
 
-    def forward(self, x, sublayer):
-        return x + self.dropout(sublayer(self.norm(x))) ## 논문에서는 normalize하기 전에 sublayer를 썻지만 Effective를 위해 norm 한뒤 sublayer를 통과
+    def forward(self, x, sublayer, return_with_aux=False):
+        if return_with_aux:
+            out, aux = sublayer(self.norm(x))
+            return x + self.dropout(out), aux
+        else:
+            return x + self.dropout(sublayer(self.norm(x)))
 
 class DeformableAttention1D(nn.Module):
     def __init__(
@@ -1051,7 +1060,8 @@ class DeformableAttention1D(nn.Module):
         assert divisible_by(heads, offset_groups)
 
         inner_dim = dim_head * heads
-        self.scale = dim_head ** -0.5
+        # self.scale = dim_head ** -0.5
+        self.register_buffer("scale", torch.tensor(dim_head ** -0.5, dtype=torch.float32))
         self.heads = heads
         self.offset_groups = offset_groups  
 
@@ -1060,6 +1070,7 @@ class DeformableAttention1D(nn.Module):
 
         self.to_offsets = nn.Sequential(
             nn.Conv1d(offset_dims,offset_dims,offset_kernel_size,groups=offset_dims,stride = downsample_factor, padding = (offset_kernel_size - downsample_factor) // 2,device=device),
+            nn.GroupNorm(1, offset_dims), 
             nn.GELU(),
             nn.Conv1d(offset_dims,1,1,bias=False,device=device),
             Rearrange('b 1 n -> b n'),
@@ -1074,109 +1085,124 @@ class DeformableAttention1D(nn.Module):
         
         self.to_out = nn.Conv1d(inner_dim,dim,1,device=device)
 
-    def forward(self,x,prev_x):
+    def forward(self, x, prev_x):
         """
-        b - batch
-        h - heads
-        n - sequence dimension
-        d - dimension
-        g - offset groups
-
-        x (input) : (batch, sequence, dim)
-        prev_x (input) : (batch, sequence, dim)
-
-        Processing shape : (batch, dim, sequence)
-        """
-
-        x = rearrange(x, 'b n d -> b d n')
-        prev_x = rearrange(prev_x, 'b n d -> b d n')
-
-        heads, b, n, downsample_factor, device = self.heads, x.shape[0], x.shape[-1], self.downsample_factor, x.device
-
-        concatenated_query = torch.cat([prev_x,x],dim=1)    ## channel-wise concatenation (prev_history, current_history)
-        q = self.to_q(concatenated_query)       ## (b, inner_dim, sequence)
+        x: (B, N, D)  torch.Size([1, 2500, 64])
+        prev_x: (B, N, D)
         
-        group = lambda t: rearrange(t, 'b (g d) n -> (b g) d n', g=self.offset_groups)
+        Returns: out shape : torch.Size([1, 2500, 64]), offsets shape : torch.Size([16, 625]
+        F.grid_sample을 활용하여 입력 텐서의 특정 위치에서 값을 grid에서 정의한 (x,y) 좌표에 대응하는 값을 샘플링하는 기능을 구현합니다.
+        input은 원래 1D 이지만, (B2G, d_g, 1, L_in) 형태로 가짜 2D 좌표를 만듬
+        grid는 (B2G, L_out, 1, 2) (x,0)만 써서 x 위치에 따라 샘플링
+        결과는 (B2G, d_g, L_out, 1) 형태에서 squeeze 후 (B2G, d_g, L_out)로 변환됨
+        
+        """
+        x = rearrange(x, 'b n d -> b d n')              # (B, D, N)                 (1, 64, 2500) 
+        prev_x = rearrange(prev_x, 'b n d -> b d n')    # (B, D, N)                 (1, 64, 2500)
 
-        grouped_queries = group(q)  ## (b*heads, offset_dims , sequence)
-        offsets = self.to_offsets(grouped_queries) ## offsets size : [8, 2500]
-        assert torch.isfinite(offsets).all(), "[NaN] in offsets!"
+        B, N, device = x.shape[0], x.shape[-1], x.device
+        heads, G = self.heads, self.offset_groups
 
-        grid = torch.arange(offsets.shape[-1], device=device)
-        vgrid = grid + offsets
-        vgrid_scaled = normalize_grid(vgrid)
-        vgrid_scaled = vgrid_scaled.repeat(2,1)
+        # === Q ===
+        concatenated_query = torch.cat([prev_x, x], dim=1)   # (B, 2D, N)           (1, 128, 2500)
+        q = self.to_q(concatenated_query)                    # (B, inner_dim, N)    (1, 512, 2500)
+        
+        group = lambda t: rearrange(t, 'b (g d) n -> (b g) d n', g=G)
+        grouped_queries = group(q)                           # (B*G, d_g, N)        (8, 64, 2500)
 
-        kv_input = torch.cat([prev_x, x], dim=0)         # [2b, d, n]
-        grouped_kv_input = group(kv_input)               # [2b * g, d_g, n]
+        offsets = self.to_offsets(grouped_queries)           # (B*G, L_out)         (8, 625)
 
-        kv_feats = grid_sample_1d(
+        # === KV ===
+        kv_input = torch.cat([prev_x, x], dim=0)             # (2B, D, N)           (2, 64, 2500)
+        grouped_kv_input = group(kv_input)                   # (2B*G, d_g, N)       (16, 8, 2500)
+
+        # === offsets repeat ===
+        offsets = offsets.repeat(2, 1)                       # (2B*G, L_out)        (16,625)
+
+        # === grid ===
+        L_in = grouped_kv_input.shape[-1]   # L_in = 2500
+        L_out = offsets.shape[-1]           # L_out = 625
+        B2G = grouped_kv_input.shape[0]     # B2G = 16 
+
+        pos = torch.linspace(0, L_in - 1, steps=L_out, device=device).unsqueeze(0).expand(B2G, -1)  # (16, 625)
+        vgrid = pos + offsets                                                                       # (16, 625)
+        vgrid_scaled = 2.0 * (vgrid / max(L_in - 1, 1)) - 1.0                                       # (16, 625)  # [-1, 1] 범위로 정규화
+
+        vgrid_scaled = vgrid_scaled.unsqueeze(-1)                                                   #  (B2G, L_out, 1)  grid sampling의 x 값(16, 625, 1)
+        dummy_y = torch.zeros_like(vgrid_scaled)                                                    # (B2G, L_out, 1)   grid smapling의 y 값, 여기서는 0  (16, 625, 1)                 
+        
+        grouped_kv_input = grouped_kv_input.unsqueeze(-2)                                           # (B2G, d_g, 1, L_in) (16, 8, 1, 2500)
+        grid = torch.cat([vgrid_scaled, dummy_y], dim=-1).unsqueeze(2)                              # (B2G, L_out, 1, 2) 여기서 2는 샘플링 할 (X,Y) 좌표를 의미함 (16, 625, 1, 2)
+        
+        ## kv_feats shape (16, 8, 625, 1)에서 squeeze 후 (16, 8, 625)로 변환됨
+        ## F.grid_sample(input, grid) ==> input : (N, C, H_int, W_int)  grid : (N, H_out, W_out, 2) ==> output : (N, C, H_out, W_out)
+        kv_feats = F.grid_sample(
             grouped_kv_input,
-            vgrid_scaled,                   # [2b * g, n]
+            grid,
             mode='bilinear',
-            padding_mode='zeros',
-            align_corners=False
-        )
+            align_corners=True,
+            padding_mode='zeros'
+        ).squeeze(-1)
 
-        kv_feats = rearrange(kv_feats, '(b g) d n -> b (g d) n', b = b * 2)
-        assert torch.isfinite(kv_feats).all(), "[NaN] kv_feats after grid_sample!"
-
-        # 선택: current의 절반만 사용할 경우
-        # kv_feats = kv_feats[b:]
+        kv_feats = rearrange(kv_feats, '(b g) d n -> b (g d) n', b=2 * B)   ## (2, 64, 625)
+        
+        # === K, V ===
         k, v = self.to_k(kv_feats), self.to_v(kv_feats)
-
         q = q * self.scale
-        
-        assert torch.isfinite(q).all(), "[NaN] q!"
-        assert torch.isfinite(k).all(), "[NaN] k!"
-        assert torch.isfinite(v).all(), "[NaN] v!"
 
-        q, k, v = map(lambda t : rearrange(t,'b (h d) n -> b h n d', h = heads), (q, k, v))     
+        q, k, v = map(lambda t: rearrange(t, 'b (h d) n -> b h n d', h=heads), (q, k, v))       
+        q = q.expand(2,-1,-1,-1)        ## k,v 의 batch 를 맞추기 위해 2로 확장
+        ## q shape : torch.Size([2, 8, 2500, 64])
+        ## k shape : torch.Size([2, 8, 625, 64])
+        ## v shape : torch.Size([2, 8, 625, 64])
 
-        similarity = einsum('b h i d, b h j d -> b h i j', q ,k)    ## q (batch, heads, sequnece, dim) @ k (batch, heads, offset-modified sequnce, dim)  ==> ( batch, heads, sequnce, offset-modified sequnce )
-        similarity = torch.clamp(similarity, -20.0, 20.0)           ## 너무 큰값이면 NAN 문제가 생김, 훈련 초기에는 파라미터가 랜덤이라 NAN이 잘 발생
+        similarity = einsum('b h i d, b h j d -> b h i j', q, k)
         
-        atten = similarity.softmax(dim=-1)  
+        similarity = torch.clamp(similarity, -5, 5)
+        atten = similarity.softmax(dim=-1)
         atten = self.dropout(atten)
 
-        out = einsum('b h i j, b h j d -> b h i d', atten, v)       ## ( batch, heads, sequnce, offset-modified sequnce ) @ v (batch, heads, offset-modified sequnce, dim) ==> (batch, heads, sequnce, dim)
-        out = rearrange(out, 'b h n d -> b (h d) n')                ## (batch, heads, sequnce, dim) ==> (batch, dim, sequnce)
+        out = einsum('b h i j, b h j d -> b h i d', atten, v)
+        out = rearrange(out, 'b h n d -> b (h d) n')
         out = self.to_out(out)
-        out = rearrange(out,'b d n -> b n d')
+        out = rearrange(out, 'b d n -> b n d')
 
-        out = out.view(2,b,n,-1).permute(2,3,1,0)
-        out = out.mean(-1)                              ## 2*batch mean 
-        out = out.permute(2,0,1)
+        # === prev/current 평균 ===
+        out = out.view(2, B, N, -1).permute(2, 3, 1, 0)
+        out = out.mean(-1).permute(2, 0, 1)  # (B, N, D)
 
-        # print('Deformable Attetion finished')
-        return out
+        return out, offsets
 
 class TSABlock(nn.Module):
-    def __init__(self, deformable_block : DeformableAttention1D, feedforward_block : FeedforwardBlock, dropout : float):
+    def __init__(self, deformable_block : DeformableAttention1D, feedforward_block : FeedforwardBlock, dropout : float, normalized_shape ):
         super().__init__()
         self.deformabel_block = deformable_block
         self.feedforward_block = feedforward_block
-        self.residual_connection = nn.ModuleList([ResidualConnection(dropout) for _ in range(2)])
+        self.residual_connection = nn.ModuleList([ResidualConnection(dropout,normalized_shape) for _ in range(2)])
 
     def forward(self, bev_query, prev_bev):
-        bev_query = self.residual_connection[0](bev_query,lambda bev_query: self.deformabel_block(bev_query,prev_bev))
-        # print('Residual after Deformable finished')
-        bev_query = self.residual_connection[1](bev_query,self.feedforward_block)
-        # print('Residual after FFN finished')
+        def deformable_fn(bev_query):
+            out, offsets = self.deformabel_block(bev_query, prev_bev)
+            return out, offsets
 
-        return bev_query
+        out_and_offsets = self.residual_connection[0](bev_query, deformable_fn, return_with_aux=True)
+        bev_query, offsets = out_and_offsets
+
+        bev_query = self.residual_connection[1](bev_query, self.feedforward_block)
+        return bev_query, offsets
     
 class TSA_Loop(nn.Module):
-    def __init__(self, layers : nn.ModuleList):
+    def __init__(self, layers: nn.ModuleList):
         super().__init__()
         self.layers = layers
-        self.norm = LayerNormalization()
 
-    def forward(self, bev_query, prev_bev):
+    def forward(self, x, prev_x):
+        offsets_list = []
         for layer in self.layers:
-            bev_query = layer(bev_query,prev_bev)
-        return self.norm(bev_query)
-
+            x, offsets = layer(x, prev_x)
+            offsets_list.append(offsets)
+        return x, offsets_list
+    
 class BevSegHead(nn.Module):
     def __init__(self, target, input_dim, dynamic_output_class=None, static_output_class=None):
         super(BevSegHead, self).__init__()
@@ -1197,17 +1223,20 @@ class BevSegHead(nn.Module):
 
         else:  # both
             assert dynamic_output_class is not None and static_output_class is not None
-            self.dynamic_head = nn.Sequential( nn.Conv2d(input_dim,
+            self.dynamic_head = nn.Sequential(nn.Conv2d(input_dim,
                                           dynamic_output_class,
                                           kernel_size=3,
                                           padding=1),
-                                          nn.GroupNorm(1,dynamic_output_class))     ## Conv2d 출력의 mean,var을 일정하게 만들어 안정적 스케일을 맞춰줌, GroupNorm(1[Conv2d output channel을 1개의 그룹으로 본다], 2)
+                                        #   nn.GroupNorm(1,dynamic_output_class,eps=1e-3),
+                                          nn.ReLU(inplace=True))  # 또는 nn.SiLU() 등)     ## Conv2d 출력의 mean,var을 일정하게 만들어 안정적 스케일을 맞춰줌, GroupNorm(1[Conv2d output channel을 1개의 그룹으로 본다], 2)
+                                          
             self.static_head = nn.Sequential(
                 nn.Conv2d(input_dim,
                         static_output_class,
                         kernel_size=3,
                         padding=1),
-                        nn.GroupNorm(1,static_output_class)
+                        # nn.GroupNorm(1,static_output_class,eps=1e-3),
+                        nn.ReLU(inplace=True)  # 또는 nn.SiLU() 등
             )
             self.dynamic_head = self.dynamic_head.float()
             self.static_head = self.static_head.float()
@@ -1230,13 +1259,15 @@ class BevSegHead(nn.Module):
         else:
             with torch.cuda.amp.autocast(enabled=False):        ## float32로 강제
                 x = x.float()
+                x = torch.nan_to_num(x, nan=0.0, posinf=1e3, neginf=-1e3)
                 dynamic_map = self.dynamic_head(x)
+                dynamic_map = torch.nan_to_num(dynamic_map, nan=0.0, posinf=1e3, neginf=-1e3)
                 assert torch.isfinite(dynamic_map).all(), f"NaN in dynamic_map!"
-                dynamic_map = self.dynamic_head(x)
                 dynamic_map = rearrange(dynamic_map, '(b l) c h w -> b l c h w',
                                         b=b, l=l)
-                
+    
                 static_map = self.static_head(x)
+                static_map = torch.nan_to_num(static_map, nan=0.0, posinf=1e3, neginf=-1e3)
                 assert torch.isfinite(static_map).all(), f"NaN in static_map!"
                 static_map = rearrange(static_map, '(b l) c h w -> b l c h w',
                                     b=b, l=l)
@@ -1275,14 +1306,15 @@ class Mini_cooper(nn.Module):
         # print("ENCODED BEV SHAPE OF MULTI_AGENTS", encoded_bev.shape)     ## (max_padded_cavs(5), 1, 64, 200, 200)
         ##          64 channel Case (For Training)
         mapped_bev= get_large_bev(self.data_aug_conf, encoded_bev,vis_encoded_bev, positions, valid_mask, save_vis = False)
+
         assert torch.isfinite(mapped_bev).all(), "[NaN] mapped_bev after encoding!"
-        # print("LARGE BEV:::: ", mapped_bev, mapped_bev.shape)
+        # print("LARGE BEV:::: ", mapped_bev, mapped_bev.shape)     ##  torch.Size([1, 64, 400, 400]) [B, Channel, H, W]
         return mapped_bev    ## true_poas (x,y,yaw) 3차원으로 나옴
     
     ############################################################################################
     def loop_output(self, bev_query, prev_bev, bool_prev_pos_encoded):
         """
-        bev_query shape : torch.Size([1, 64, 200, 200])
+        bev_query shape : torch.Size([1, 64, 400, 400])
         """
         # bev_query = bev_query.unsqueeze(0)
         bev_query = self.pseudo_patching(bev_query)
@@ -1297,9 +1329,10 @@ class Mini_cooper(nn.Module):
             prev_bev = self.positional_encoding(prev_bev)
             # print("prev bev is positional encoded")
 
-        result = self.tsa_loop(bev_query,prev_bev)
+        ## bev_query shape : torch.Size([1, 2500, 64])
+        result, offsets_list = self.tsa_loop(bev_query,prev_bev)
         assert torch.isfinite(result).all(), "[NaN] tsa_loop output!"
-        return result
+        return result, offsets_list
     
     def postprocessing_after_model(self, loop_result):
         postprocessed_output = self.pseudo_decoding(loop_result)
@@ -1317,18 +1350,28 @@ class Mini_cooper(nn.Module):
 
     def forward(self, current_bev, prev_bev, bool_prev_pos_encoded):
 
-        loop_output = self.loop_output(current_bev, prev_bev,bool_prev_pos_encoded)
-        loop_output = torch.clamp(loop_output,-10,10) ## NaN 방지
+        loop_output, offsets_list = self.loop_output(current_bev, prev_bev, bool_prev_pos_encoded)
+        # print("loop_output mean/std:", loop_output.mean().item(), loop_output.std().item())
         assert torch.isfinite(loop_output).all(), "[NaN] loop_output after tsa_loop!"
         # print(f'Loop Output shape : {loop_output.shape}')
         model_output = self.postprocessing_after_model(loop_output)
+        # print("pseudo_decoding output mean/std:", model_output.mean().item(), model_output.std().item())
+
+        model_output = torch.nan_to_num(model_output, nan=0.0, posinf=1e3, neginf=-1e3)
+        model_output = torch.clamp(model_output,-10,10) ## NaN 방지
         assert torch.isfinite(model_output).all(), "[NaN] before seg_head!"
+
         # print(f'After PostProcessing from loop output : {model_output.shape}')  ## shape : torch.Size([1, 64, 400, 400])
         seg_loss_dict = self.seg_head(model_output)
+        # with torch.no_grad():
+        #     print("dynamic_seg:", seg_loss_dict["dynamic_seg"].mean().item(), seg_loss_dict["dynamic_seg"].std().item())
+        #     print("static_seg :", seg_loss_dict["static_seg"].mean().item(), seg_loss_dict["static_seg"].std().item())
+
         # print(f'Head Output shape : {head_output["dynamic_seg"].shape}')
         
         dummy_pos_loss = torch.randn(1).to('cuda')
-        final_dict = self.add_item_to_dict(seg_loss_dict,'pos_loss', dummy_pos_loss)
+        final_dict = self.add_item_to_dict(seg_loss_dict,'offsets', offsets_list)
+        final_dict = self.add_item_to_dict(final_dict,'pos_loss', dummy_pos_loss)
         
         return final_dict
         
@@ -1414,7 +1457,7 @@ def ysmodel(
     for _ in range(N):
         multi_attention_block = DeformableAttention1D(dim = bev_emb_dim,heads=h,device=device)
         feed_forward_block = FeedforwardBlock(bev_emb_dim,d_feed_forward,dropout,device)
-        model_block = TSABlock(multi_attention_block,feed_forward_block,dropout)
+        model_block = TSABlock(multi_attention_block,feed_forward_block,dropout,bev_dim)
         model.append(model_block)
     
     tsa_loop = TSA_Loop(nn.ModuleList(model))

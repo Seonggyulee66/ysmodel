@@ -19,6 +19,7 @@ class CamIntermediateFusionDataset_per_scenario(base_camera_dataset.BaseCameraDa
         self.visible = params['train_params']['visible']
         self.chunk_size = 30
         self.chunk_index_list = self.build_chunk_index()
+    
 
     
     ## 이전과는 다르게 scenario별로 처리하기위해 이전의 tick 기준 __len__을 override
@@ -27,21 +28,33 @@ class CamIntermediateFusionDataset_per_scenario(base_camera_dataset.BaseCameraDa
         
     def build_chunk_index(self):
         chunk_index_list = []
+        debug_cfg = self.params['train_params'].get('debug_scenario', None)
+
         for scenario_id in self.scenario_idx_list:
             timestamps = self.get_tick_indices_for_scenario(scenario_id)
+
+            if debug_cfg:
+                if scenario_id == debug_cfg['scenario_id']:
+                    timestamps = timestamps[debug_cfg['start_tick']:debug_cfg['end_tick']]
+                else:
+                    continue  # 다른 시나리오는 무시
+
             for i in range(0, len(timestamps), self.chunk_size):
                 chunk_index_list.append({
                     'scenario_id': scenario_id,
                     'start_tick': i,
                     'end_tick': min(i + self.chunk_size, len(timestamps))
                 })
+
         return chunk_index_list
         
     def __getitem__(self, idx):
         chunk_info = self.chunk_index_list[idx]
         scenario_id = chunk_info['scenario_id']
         tick_range = range(chunk_info['start_tick'], chunk_info['end_tick'])
-
+        
+        print(f"[Debug] Scenario ID: {scenario_id} | Ticks: {list(tick_range)}")
+        
         scenario_data = []
         for tick_idx in tick_range:
             # 기존 get_sample_random() 호출

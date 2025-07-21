@@ -212,6 +212,7 @@ def setup_lr_schedular(hypes, optimizer, n_iter_per_epoch):
     n_iter_per_epoch : int
         Iterations per epoech.
     """
+    accumulation_step = 5
     lr_schedule_config = hypes['lr_scheduler']
 
     if lr_schedule_config['core_method'] == 'step':
@@ -239,8 +240,8 @@ def setup_lr_schedular(hypes, optimizer, n_iter_per_epoch):
     elif lr_schedule_config['core_method'] == 'cosineannealwarm':
         print('cosine annealing is chosen for lr scheduler')
 
-        num_steps = lr_schedule_config['epoches'] * n_iter_per_epoch
-        warmup_lr = lr_schedule_config['warmup_lr']
+        num_steps = lr_schedule_config['epoches'] * n_iter_per_epoch / accumulation_step
+        warmup_lr = lr_schedule_config['warmup_lr'] / accumulation_step
         warmup_steps = lr_schedule_config['warmup_epoches'] * n_iter_per_epoch
         lr_min = lr_schedule_config['lr_min']
 
@@ -400,11 +401,14 @@ def torch_tensor_to_numpy(tensor):
 def save_bev_seg_binary(output_dict,
                         batch_dict,
                         output_dir,
+                        chunk_id,
                         batch_iter,
                         epoch,
                         test=False):
     """
     Save the BEV segmentation results during training, including all agents' camera inputs.
+    output_dict -> post_process된 model output [torch.Size([1, 512, 512])]
+    batch_dict -> batch_dict['ego'][~~] 로 정리된 dictionary [ex) ['inputs'] -> torch.Size([1, 5, 1, 4, 512, 512, 3])]
     """
 
     if test:
@@ -414,12 +418,18 @@ def save_bev_seg_binary(output_dict,
 
     os.makedirs(output_folder, exist_ok=True)
 
-    batch_size = batch_dict['ego']['gt_static'].shape[0]
-    num_agents = batch_dict['ego']['inputs'].shape[0]
-    num_cameras = batch_dict['ego']['inputs'].shape[2]
+    batch_size = batch_dict['ego']['gt_static'].shape[2] 
+    num_agents = 0
+    
+    for i in range(batch_dict['ego']['inputs'].shape[1]):
+        if torch.all(batch_dict['ego']['inputs'][0,i,0,0,:] == 0.):
+            continue
+        num_agents += 1
+    
+    num_cameras = batch_dict['ego']['inputs'].shape[3]
 
     for i in range(batch_size):
-        gt_dynamic = batch_dict['ego']['gt_dynamic'].detach().cpu().numpy()[i, 0]
+        gt_dynamic = batch_dict['ego']['gt_dynamic'].detach().cpu().numpy()[0, i, 0]
         gt_dynamic = np.array(gt_dynamic * 255., dtype=np.uint8)
 
         pred_dynamic = output_dict['dynamic_map'].detach().cpu().numpy()[i]
@@ -441,7 +451,7 @@ def save_bev_seg_binary(output_dict,
 
         # 1~3행: Camera views (Agent 순서대로 위에서부터 나열)
         for agent_id in range(num_agents):
-            raw_images = batch_dict['ego']['inputs'][agent_id, i]  # shape: (4, 512, 512, 3)
+            raw_images = batch_dict['ego']['inputs'][0, agent_id, i]  # shape: (4, 512, 512, 3)
             for cam_id in range(num_cameras):
                 raw_image = raw_images[cam_id].detach().cpu().numpy()
                 raw_image = 255 * ((raw_image * STD) + MEAN)
@@ -460,7 +470,7 @@ def save_bev_seg_binary(output_dict,
             if agent_id == num_agents - 1:
                 target_width = canvas_w - x_offset  # 마지막 agent는 남은 폭 전부
 
-            bev_map = batch_dict['ego']['single_bev'][agent_id, 0].detach().cpu().numpy()
+            bev_map = batch_dict['ego']['single_bev'][0, agent_id, 0].detach().cpu().numpy()
             bev_map = np.array(bev_map * 255., dtype=np.uint8)
             bev_map = cv2.resize(bev_map, (target_width, bev_height), interpolation=cv2.INTER_NEAREST)
             bev_map = cv2.cvtColor(bev_map, cv2.COLOR_GRAY2BGR)
@@ -481,7 +491,7 @@ def save_bev_seg_binary(output_dict,
         visualize_summary[y_dyn_start:y_dyn_start + dynmap_height, canvas_w // 2:canvas_w, :] = pred_dynamic
 
         # Save
-        save_path = os.path.join(output_folder, f'{batch_iter}_{i}_vis.png')
+        save_path = os.path.join(output_folder, f'{int(chunk_id)}_{batch_iter}_{i}_vis.png')
         cv2.imwrite(save_path, visualize_summary)
 
 

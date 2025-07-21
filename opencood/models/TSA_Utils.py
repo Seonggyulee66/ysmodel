@@ -78,14 +78,39 @@ def default(val, d):
 def divisible_by(numer, denom):
     return (numer % denom) == 0
 
-def grid_sample_1d(feats, grid, *arg, **kwargs):
-    ## makes 1D grid sample by reshaping it to 2D
 
-    grid = rearrange(grid, '... -> ... 1 1')    # 차원 추가
-    grid = F.pad(grid, (1,0), value=0.)
-    feats = rearrange(feats, '... -> ... 1')
-    out = F.grid_sample(feats, grid, **kwargs)
-    return rearrange(out, '... 1-> ...')
+def grid_sample_1d(feats, offsets):
+    """
+    feats: (B, C, L)
+    offsets: (B, L_out)
+    """
+    B, C, L = feats.shape
+    B_offsets, L_out = offsets.shape
+
+    device = feats.device
+
+    # pos shape must match offsets batch
+    pos = torch.linspace(0, L - 1, steps=L_out, device=device).unsqueeze(0).expand(B_offsets, -1)
+    print(f"pos shape: {pos.shape} | offsets shape: {offsets.shape}")
+
+    vgrid = pos + offsets
+
+    vgrid_scaled = 2.0 * (vgrid / max(L - 1, 1)) - 1.0
+
+    vgrid_scaled = vgrid_scaled.unsqueeze(-1)
+    dummy_y = torch.zeros_like(vgrid_scaled)
+    grid = torch.cat([vgrid_scaled, dummy_y], dim=-1)
+
+    feats = feats.unsqueeze(-2)
+    out = F.grid_sample(
+        feats,
+        grid.unsqueeze(2),
+        mode='bilinear',
+        align_corners=True,
+        padding_mode='zeros'
+    )
+    return out.squeeze(-2).squeeze(-2)
+
 
 
 def normalize_grid(arange, dim=1,out_dim=-1):

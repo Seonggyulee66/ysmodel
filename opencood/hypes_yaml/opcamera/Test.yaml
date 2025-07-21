@@ -6,10 +6,14 @@ validate_dir: './small_train'
 train_params:
   batch_size: &batch_size 1
   epoches: &epoches 100
-  eval_freq: 10
-  save_freq: 10
+  eval_freq: 100
+  save_freq: 100
   max_cav: &max_cav 7
   visible: False
+  debug_scenario:
+    scenario_id: 0
+    start_tick: 0
+    end_tick: 10
 
 
 fusion:
@@ -70,7 +74,7 @@ model:
     deconv:
       large_bev_size : 400
       patch_size :  8
-      N : 4
+      N : 1
       h : 8
       dropout : 0.1 
       d_feed_forward : 1024
@@ -88,17 +92,24 @@ loss:
     d_coe: 2.0
     s_coe: 2.0
     p_coe : 0.0
+    o_coe : 0.02
 
 optimizer:
   core_method: AdamW
   lr: 2e-4
   args:
-    eps: 1e-10
+    eps: 1e-8
     weight_decay: 1e-2
 
 lr_scheduler:
-    core_method: cosineannealwarm #step, multistep, Exponential and cosineannealwarm support
-    epoches: *epoches
-    warmup_lr: 2e-5
-    warmup_epoches: 10
-    lr_min: 5e-6
+  core_method: step
+  step_size: 99999
+  gamma: 1.0
+
+
+# lr_scheduler:
+#   core_method: cosineannealwarm
+#   epoches: *epoches
+#   warmup_epoches: 5
+#   warmup_lr: 1e-6
+#   lr_min: 1e-6

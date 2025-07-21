@@ -16,6 +16,7 @@ class VanillaSegLoss(nn.Module):
         self.d_coe = args['d_coe']
         self.s_coe = args['s_coe']
         self.p_coe = args['p_coe']
+        self.o_coe = args['o_coe']
 
         self.target = args['target']
 
@@ -86,13 +87,17 @@ class VanillaSegLoss(nn.Module):
             static_loss = self.loss_func_static(static_pred, static_gt)
             assert torch.isfinite(static_loss).all(), f"static_loss: {static_loss}"
 
+        offset_loss = 0
         pos_loss = output_dict['pos_loss'][0]
+        for offsets in output_dict['offsets'][0]:
+            offset_loss += offsets.abs().mean()
         
-        total_loss = self.s_coe * static_loss + self.d_coe * dynamic_loss + self.p_coe * pos_loss
+        total_loss = self.s_coe * static_loss + self.d_coe * dynamic_loss + self.p_coe * pos_loss + self.o_coe* offset_loss
         self.loss_dict.update({'total_loss': total_loss,
                                'static_loss': static_loss,
                                'dynamic_loss': dynamic_loss,
-                               'pos_loss': pos_loss})
+                               'pos_loss': pos_loss,
+                               'off_loss' : offset_loss})
 
         return total_loss
 
@@ -115,17 +120,18 @@ class VanillaSegLoss(nn.Module):
         static_loss = self.loss_dict['static_loss']
         dynamic_loss = self.loss_dict['dynamic_loss']
         pos_loss = self.loss_dict['pos_loss']
+        offset_loss = self.loss_dict['off_loss']
         if rank == 0:
             if pbar is None:
                 print("[epoch %d][%d/%d], [Scenario Id %d] || Loss: %.4f || static Loss: %.4f"
-                    " || Dynamic Loss: %.4f || Position Loss : %.4f" % (
+                    " || Dynamic Loss: %.4f || Position Loss : %.4f || Offset Loss : %.4f"  % (
                         epoch, batch_id + 1, batch_len, scenario_id_check,
-                        total_loss.item(), static_loss.item(), dynamic_loss.item(), pos_loss.item()))
+                        total_loss.item(), static_loss.item(), dynamic_loss.item(), pos_loss.item(), offset_loss.item()))
             else:
                 pbar.set_description("[epoch %d][%d/%d], [Scenario Id %d] || Loss: %.4f || static Loss: %.4f"
-                    " || Dynamic Loss: %.4f || Postion Loss : %.4f" % (
+                    " || Dynamic Loss: %.4f || Postion Loss : %.4f || Offset Loss : %.4f" % (
                         epoch, batch_id + 1, batch_len,scenario_id_check,
-                        total_loss.item(), static_loss.item(), dynamic_loss.item(), pos_loss.item()))
+                        total_loss.item(), static_loss.item(), dynamic_loss.item(), pos_loss.item(),  offset_loss.item()))
 
 
             writer.add_scalar('Static_loss', static_loss.item(),
@@ -133,6 +139,8 @@ class VanillaSegLoss(nn.Module):
             writer.add_scalar('Dynamic_loss', dynamic_loss.item(),
                             epoch*batch_len + batch_id)
             writer.add_scalar('Position_loss', pos_loss.item(),
+                            epoch*batch_len + batch_id)
+            writer.add_scalar('Offset_loss', offset_loss.item(),
                             epoch*batch_len + batch_id)
 
 
