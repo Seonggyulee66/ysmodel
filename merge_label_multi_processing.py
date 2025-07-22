@@ -10,24 +10,33 @@ from torch.utils.data import DataLoader
 import opencood.hypes_yaml.yaml_utils as yaml_utils
 from opencood.data_utils.datasets import build_dataset
 
+"""
+!!!! 실행 시 yaml파일에 label_generation 을 true로 설정해야함 !!!!!!!
+"""
+
 # ---------------------------- 설정 ----------------------------
-data_dir = '/scratch/sglee6/opv2v_dataset/train'
+data_type = 'validate' 
+data_dir = '/scratch/sglee6/opv2v_dataset/' + data_type
 yaml_root = './opencood/hypes_yaml/opcamera/Test.yaml'
-image_types_list = ['bev_dynamic.png', 'bev_static.png', 'bev_lane.png', 'bev_visibility.png', 'bev_visibility_corp.png']
+image_types_list = ['bev_dynamic.png', 'bev_static.png', 'bev_lane.png']
 # image_types_list = ['bev_lane.png']
 com_range = 100  # meters
 
 scenario_list = os.listdir(data_dir)
 scenario_list = sorted(scenario_list)
 hypes = yaml_utils.load_yaml(yaml_root)
-opencood_train_dataset = build_dataset(hypes, visualize=False, train=True)
-
+if data_type == 'train':
+    opencood_train_dataset = build_dataset(hypes, visualize=False, train=True, validate=False)
+else:
+    opencood_train_dataset = build_dataset(hypes, visualize=False, train=True, validate=True)
+    
 for scenario_id in range(len(scenario_list)):
     scenario_name = scenario_list[scenario_id]
     cav_id_list = list(opencood_train_dataset.scenario_database[scenario_id].keys())
     for iter_cav_id in cav_id_list:
         save_dir = os.path.join(data_dir, scenario_name, iter_cav_id)
         
+
 # --------------------- BEV 병합 함수 ---------------------
 def merge_bev_image(ego_img, cav_img, T):
     T[[0, 1], 3] = T[[1, 0], 3]
@@ -65,6 +74,14 @@ def merge_bev_image(ego_img, cav_img, T):
     merged = cv2.addWeighted(canvas, alpha, warped_cav, 1 - alpha, 0)
     return merged
 
+## ego 주위에 Communication 범위 안에 cav가 없을 경우를 
+def create_canvas_with_ego(ego_img):
+    h, w = ego_img.shape[:2]
+    canvas = np.zeros((2 * h, 2 * w, 3), dtype=np.uint8)
+    center = (w, h)
+    canvas[center[1] - h // 2:center[1] + h // 2, center[0] - w // 2:center[0] + w // 2] = ego_img
+    return canvas
+
 # --------------------- 거리 계산 함수 ---------------------
 def cav_distance_cal(selected_cav_base, ego_lidar_pose):
     return math.sqrt(
@@ -93,11 +110,14 @@ def process_one_tick(args):
             ego_lidar_pose = cav_content['params']['lidar_pose']
             break
 
+    total_cav_count = 0
     for cav_id, selected_cav_base in data_sample.items():
         if cav_distance_cal(selected_cav_base, ego_lidar_pose) > com_range:
             continue
-        
-        cav_list.append(cav_id)
+        total_cav_count += 1
+        ### For Checking
+        # if selected_cav_base['ego'] == True:
+        #     print(f"label dataset Scenario ID : {scenario_id} || Ego : {cav_id}")
         
         if selected_cav_base['ego']:
             ego_img = selected_cav_base[image_type]
@@ -109,8 +129,9 @@ def process_one_tick(args):
             cav_t_matrix_list.append(T)
     
     if not cav_img_list:
-        print(f"[!] Skip: No neighbor CAVs in range for Scenario {scenario_id}, Tick {tick}, Type {image_type}")
-        return
+        print(f"[!] Single but named Merged: No neighbor CAVs in range for Scenario {scenario_list[scenario_id]}, Tick {tick}, Type {image_type}")      ## 2021_08_24_09_58_32의 경우 Ego 혼자임
+        merged_img = create_canvas_with_ego(ego_img_list[0])
+    
     
     for i in range(len(cav_img_list)):
         if i == 0:
@@ -125,7 +146,9 @@ def process_one_tick(args):
         save_file_path = os.path.join(save_dir, f'{tick}_merged_{image_type_name}.png')
         cv2.imwrite(save_file_path, merged_img)
 
-    print(f"[✓] Scenario {scenario_id}, Tick {tick}, Type {image_type_name} 저장 완료.")
+    print(f"[✓] Scenario {scenario_list[scenario_id]}, Tick {tick}, Type {image_type_name} 저장 완료. || Total CAV count : {total_cav_count}")
+    
+    return total_cav_count
 
 # --------------------- 메인 실행 ---------------------
 
@@ -143,7 +166,8 @@ print(f"총 작업 수: {len(task_list)}")
 print(f"CPU 코어 수: {cpu_count()}")
 print(f"Working CPU 코어 수: {cpu_count()-4}")
 
-with Pool(processes=max(1, cpu_count() - 4)) as pool:
-    pool.map(process_one_tick, task_list)
-    
-print("All work is done")
+with Pool(max(1,cpu_count()-4)) as pool:
+    total_cav_count = pool.map(process_one_tick, task_list)
+
+max_cav_count = max(total_cav_count)
+print(f"All work is done || Max Number of CAV is {max_cav_count}")

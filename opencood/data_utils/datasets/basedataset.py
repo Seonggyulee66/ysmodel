@@ -87,6 +87,10 @@ class BaseDataset(Dataset):
             self.transmission_speed = 27  # Mbps
             self.backbone_delay = 0  # ms
 
+        self.label_generation_mode = params['label_generation']
+        self.max_padding_cavs = params['max_padding_cavs']
+        self.chunk_size = params['chunk_size']
+        
         if self.train and not self.validate:
             root_dir = params['root_dir']
         else:
@@ -149,9 +153,9 @@ class BaseDataset(Dataset):
 
             # at least 1 cav should show up
             if self.train and not self.validate:
-                cav_list = [x for x in os.listdir(scenario_folder)
+                cav_list = sorted([x for x in os.listdir(scenario_folder)
                             if os.path.isdir(
-                        os.path.join(scenario_folder, x))]
+                        os.path.join(scenario_folder, x))])
                 # random.shuffle(cav_list)                  ## Turn off random shuffle because we need to match the label ego and training ego
                 # print(cav_list)
             else:
@@ -166,6 +170,7 @@ class BaseDataset(Dataset):
             if int(cav_list[0]) < 0:
                 cav_list = cav_list[1:] + [cav_list[0]]
 
+            # print(f"basedatset Scenario id : {i} || cav list : {cav_list}")
             # loop over all CAV data
             for (j, cav_id) in enumerate(cav_list):
                 if j > self.max_cav - 1:
@@ -307,9 +312,13 @@ class BaseDataset(Dataset):
                     data[cav_id][file_extension] = \
                         load_yaml(cav_content[timestamp_key][file_extension])
                 else:
-                    data[cav_id][file_extension] = \
-                        cv2.imread(cav_content[timestamp_key][file_extension])
+                    if self.label_generation_mode is True and file_extension.startswith("merged_"):
+                        continue
+                    else:
+                        data[cav_id][file_extension] = \
+                            cv2.imread(cav_content[timestamp_key][file_extension])
 
+                    
         return data
 
     def retrieve_by_idx(self, idx):

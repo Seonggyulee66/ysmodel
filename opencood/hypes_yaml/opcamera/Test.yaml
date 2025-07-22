@@ -1,20 +1,14 @@
 name: ysmodel # only used for demonstration data api
-root_dir: './train'
-validate_dir: './small_train'
-
+root_dir: '/scratch/sglee6/opv2v_dataset/train'
+validate_dir: '/scratch/sglee6/opv2v_dataset/validate'
 
 train_params:
   batch_size: &batch_size 1
   epoches: &epoches 100
-  eval_freq: 100
-  save_freq: 100
+  eval_freq: 1
+  save_freq: 1
   max_cav: &max_cav 7
   visible: False
-  debug_scenario:
-    scenario_id: 0
-    start_tick: 0
-    end_tick: 10
-
 
 fusion:
   core_method: 'CamIntermediateFusionDataset_per_scenario' # LateFusionDataset, EarlyFusionDataset, IntermediateFusionDataset supported
@@ -22,6 +16,9 @@ fusion:
 
 data_augment: []
 add_data_extension: ['bev_dynamic.png', 'bev_static.png', 'bev_lane.png', 'bev_visibility.png', 'bev_visibility_corp.png','merged_bev_dynamic.png','merged_bev_static.png','merged_bev_lane.png']
+label_generation : false ## true or false
+max_padding_cavs : 7
+chunk_size : 20
 
 # preprocess-related
 preprocess:
@@ -74,7 +71,7 @@ model:
     deconv:
       large_bev_size : 400
       patch_size :  8
-      N : 1
+      N : 6
       h : 8
       dropout : 0.1 
       d_feed_forward : 1024
@@ -102,14 +99,8 @@ optimizer:
     weight_decay: 1e-2
 
 lr_scheduler:
-  core_method: step
-  step_size: 99999
-  gamma: 1.0
-
-
-# lr_scheduler:
-#   core_method: cosineannealwarm
-#   epoches: *epoches
-#   warmup_epoches: 5
-#   warmup_lr: 1e-6
-#   lr_min: 1e-6
+  core_method: cosineannealwarm
+  epoches: *epoches
+  warmup_epoches: 5
+  warmup_lr: 5e-5
+  lr_min: 1e-6

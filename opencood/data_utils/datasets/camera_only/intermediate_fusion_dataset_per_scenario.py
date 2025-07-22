@@ -17,10 +17,7 @@ class CamIntermediateFusionDataset_per_scenario(base_camera_dataset.BaseCameraDa
                                                            train,
                                                            validate)
         self.visible = params['train_params']['visible']
-        self.chunk_size = 30
         self.chunk_index_list = self.build_chunk_index()
-    
-
     
     ## 이전과는 다르게 scenario별로 처리하기위해 이전의 tick 기준 __len__을 override
     def __len__(self):
@@ -28,16 +25,9 @@ class CamIntermediateFusionDataset_per_scenario(base_camera_dataset.BaseCameraDa
         
     def build_chunk_index(self):
         chunk_index_list = []
-        debug_cfg = self.params['train_params'].get('debug_scenario', None)
 
         for scenario_id in self.scenario_idx_list:
             timestamps = self.get_tick_indices_for_scenario(scenario_id)
-
-            if debug_cfg:
-                if scenario_id == debug_cfg['scenario_id']:
-                    timestamps = timestamps[debug_cfg['start_tick']:debug_cfg['end_tick']]
-                else:
-                    continue  # 다른 시나리오는 무시
 
             for i in range(0, len(timestamps), self.chunk_size):
                 chunk_index_list.append({
@@ -52,8 +42,6 @@ class CamIntermediateFusionDataset_per_scenario(base_camera_dataset.BaseCameraDa
         chunk_info = self.chunk_index_list[idx]
         scenario_id = chunk_info['scenario_id']
         tick_range = range(chunk_info['start_tick'], chunk_info['end_tick'])
-        
-        print(f"[Debug] Scenario ID: {scenario_id} | Ticks: {list(tick_range)}")
         
         scenario_data = []
         for tick_idx in tick_range:
@@ -340,8 +328,6 @@ class CamIntermediateFusionDataset_per_scenario(base_camera_dataset.BaseCameraDa
         single_bev_all_batch = []
         timestamp_all_batch = []
 
-        MAX_AGENTS = 5   # ✅ 여기서 max_agents 고정
-
         for tick_dict in scenario_sequence:
             ego_dict = tick_dict['ego']
 
@@ -354,12 +340,12 @@ class CamIntermediateFusionDataset_per_scenario(base_camera_dataset.BaseCameraDa
             record_len.append(current_agents)
 
             # ✅ padding
-            cam_data_padded = self.pad_agents(camera_data, MAX_AGENTS, camera_data.shape[1:])       ## ex) cam_data_padded : (5, 4, 512, 512, 3)
-            cam_intrinsic_padded = self.pad_agents(camera_intrinsic, MAX_AGENTS, camera_intrinsic.shape[1:])
-            cam_extrinsic_padded = self.pad_agents(camera_extrinsic, MAX_AGENTS, camera_extrinsic.shape[1:])
-            agent_true_loc_padded = self.pad_agents(agent_true_loc, MAX_AGENTS, agent_true_loc.shape[1:])
-            single_bev_padded = self.pad_agents(ego_dict['single_bev_imgae'],MAX_AGENTS, ego_dict['single_bev_imgae'].shape[1:])
-            timestamp_padded = self.pad_agents(ego_dict['timestamp_key'],MAX_AGENTS, ego_dict['timestamp_key'].shape[1:])
+            cam_data_padded = self.pad_agents(camera_data, self.max_padding_cavs, camera_data.shape[1:])       ## ex) cam_data_padded : (5, 4, 512, 512, 3)
+            cam_intrinsic_padded = self.pad_agents(camera_intrinsic, self.max_padding_cavs, camera_intrinsic.shape[1:])
+            cam_extrinsic_padded = self.pad_agents(camera_extrinsic, self.max_padding_cavs, camera_extrinsic.shape[1:])
+            agent_true_loc_padded = self.pad_agents(agent_true_loc, self.max_padding_cavs, agent_true_loc.shape[1:])
+            single_bev_padded = self.pad_agents(ego_dict['single_bev_imgae'],self.max_padding_cavs, ego_dict['single_bev_imgae'].shape[1:])
+            timestamp_padded = self.pad_agents(ego_dict['timestamp_key'],self.max_padding_cavs, ego_dict['timestamp_key'].shape[1:])
 
             cam_rgb_all_batch.append(cam_data_padded)
             cam_intrinsic_all_batch.append(cam_intrinsic_padded)

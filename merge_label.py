@@ -154,7 +154,7 @@ for image_type in image_types_list:
         tick_list.remove('ego')
         num_ticks = len(tick_list)
 
-        # check_list = []
+        check_list = []
         for tick in range(num_ticks):
             ego_img_list = []
             cav_img_list = []
@@ -180,45 +180,41 @@ for image_type in image_types_list:
                 if distance > com_range:
                     continue
                 
-                # ##################### For Checking
-                # if selected_cav_base['ego'] == True:
-                #     logging.info(f"Processing Cav List: {check_list}")  # 여기서 출력되는 값이 로그로 기록됩니다.
-                #     check_list = []
-                #     check_list.append(cav_id)
-                # else:
-                #     check_list.append(cav_id)
+                ##################### For Checking
+                if selected_cav_base['ego'] == True:
+                    print(f"label dataset Scenario ID : {scenario_id} || Ego : {cav_id}")
                 
-                if selected_cav_base['ego'] == True :
-                    # print(f'ego : {cav_id}')
-                    ego_img = selected_cav_base[image_type]
-                    ego_img_list.append(ego_img)
-                else:
-                    # print(f'cav : {cav_id}')
-                    cav_img = selected_cav_base[image_type]
-                    Transformation_matrix = selected_cav_base['params']['gt_transformation_matrix']
-                    cav_img_list.append(cav_img)
-                    cav_t_matrix_list.append(Transformation_matrix)
+            #     if selected_cav_base['ego'] == True :
+            #         # print(f'ego : {cav_id}')
+            #         ego_img = selected_cav_base[image_type]
+            #         ego_img_list.append(ego_img)
+            #     else:
+            #         # print(f'cav : {cav_id}')
+            #         cav_img = selected_cav_base[image_type]
+            #         Transformation_matrix = selected_cav_base['params']['gt_transformation_matrix']
+            #         cav_img_list.append(cav_img)
+            #         cav_t_matrix_list.append(Transformation_matrix)
             
-            for i in range(len(cav_img_list)):
-                if i == 0:
-                    merged_img = merge_bev_image(ego_img=ego_img_list[0], cav_img=cav_img_list[i], T =cav_t_matrix_list[i])
-                else:
-                    merged_img = merge_bev_image(ego_img=merged_img, cav_img=cav_img_list[i], T=cav_t_matrix_list[i])
+            # for i in range(len(cav_img_list)):
+            #     if i == 0:
+            #         merged_img = merge_bev_image(ego_img=ego_img_list[0], cav_img=cav_img_list[i], T =cav_t_matrix_list[i])
+            #     else:
+            #         merged_img = merge_bev_image(ego_img=merged_img, cav_img=cav_img_list[i], T=cav_t_matrix_list[i])
             
-            tick = tick_list[tick]
-            image_type_name, _ = os.path.splitext(image_type)
-            ### merge_bev_image는 모든 cav에 대해서 merge하기 때문데 같은 이미지를 모든 cav파일에 저장
-            for iter_cav_id in cav_id_list: 
-                print(f'senario id : {scenario_id} || cav_id : {iter_cav_id}  || tick : {tick} || image type : {image_type_name} saved ...') 
-                save_file_path = os.path.join(save_dir, 'train', scenario_list[scenario_id], iter_cav_id, f'{tick}_merged_{image_type_name}.png')
+            # tick = tick_list[tick]
+            # image_type_name, _ = os.path.splitext(image_type)
+            # ### merge_bev_image는 모든 cav에 대해서 merge하기 때문데 같은 이미지를 모든 cav파일에 저장
+            # for iter_cav_id in cav_id_list: 
+            #     print(f'senario id : {scenario_id} || cav_id : {iter_cav_id}  || tick : {tick} || image type : {image_type_name} saved ...') 
+            #     save_file_path = os.path.join(save_dir, 'train', scenario_list[scenario_id], iter_cav_id, f'{tick}_merged_{image_type_name}.png')
 
-                cv2.imwrite(save_file_path, merged_img)
+            #     cv2.imwrite(save_file_path, merged_img)
 
-                # plt.figure(figsize=(10, 10))
-                # plt.imshow(cv2.cvtColor(merged_img, cv2.COLOR_BGR2RGB))
-                # plt.title("Merged BEV")
-                # plt.axis("off")
-                # plt.show() 
+            #     # plt.figure(figsize=(10, 10))
+            #     # plt.imshow(cv2.cvtColor(merged_img, cv2.COLOR_BGR2RGB))
+            #     # plt.title("Merged BEV")
+            #     # plt.axis("off")
+            #     # plt.show() 
 
 
 

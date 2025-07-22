@@ -324,12 +324,11 @@ def main():
                     scheduler.step()
                 else:
                     scaler.scale(final_loss).backward()
-
                     if (tick_idx +1) % accumulation_steps ==0:
                         scaler.step(optimizer)
                         scaler.update()
                         optimizer.zero_grad()
-                        scheduler.step()
+                        scheduler.step(epoch)
 
                 # print('--------------------------------------------------')
 
@@ -349,128 +348,130 @@ def main():
         DistributedSampler가 아닌 SequentialSampler를 사용해야함
         현재는 속도가 느린 관계로 Distributed에 일부만 save하는 것으로함 
         """
-        # if epoch % hypes['train_params']['eval_freq'] == 0: 
-        #     valid_ave_loss = []
-        #     static_ave_iou = []
-        #     dynamic_ave_iou = []
+        if epoch != 0 and epoch % hypes['train_params']['eval_freq'] == 0: 
+            valid_ave_loss = []
+            static_ave_iou = []
+            dynamic_ave_iou = []
             
-        #     for i, scenario_batch in enumerate(val_loader):
-        #         scenario_id_check = scenario_batch['ego']['scenario_id'][0]
-        #         model.eval()
+            for i, scenario_batch in enumerate(val_loader):
+                scenario_id_check = scenario_batch['ego']['scenario_id'][0]
+                model.eval()
 
-        #         scenario_batch = train_utils.to_device(scenario_batch, device)
+                scenario_batch = train_utils.to_device(scenario_batch, device)
 
-        #         encoding_input_images = scenario_batch['ego']['inputs']
-        #         encoding_input_intrins = scenario_batch['ego']['intrinsic']
-        #         encoding_input_extrins = scenario_batch['ego']['extrinsic']
-        #         encoding_input_locs = scenario_batch['ego']['agent_true_loc']
+                encoding_input_images = scenario_batch['ego']['inputs']
+                encoding_input_intrins = scenario_batch['ego']['intrinsic']
+                encoding_input_extrins = scenario_batch['ego']['extrinsic']
+                encoding_input_locs = scenario_batch['ego']['agent_true_loc']
 
-        #         prev_encoding_result = None
+                prev_encoding_result = None
                 
-        #         for tick_idx in range(encoding_input_images.shape[0]):
-        #             with torch.cuda.amp.autocast():
-        #                 print(f"## Validation ## Scenario id : {scenario_id_check} || i : {i} || tick_idx : {tick_idx} // {encoding_input_images.shape[0]} || timestamp_key : {scenario_batch['ego']['timestamp_key'][tick_idx].squeeze().tolist()[0]}")
-        #                 tick_input_images = encoding_input_images[tick_idx].to(device)
-        #                 tick_input_intrins = encoding_input_intrins[tick_idx].to(device)
-        #                 tick_input_extrins = encoding_input_extrins[tick_idx].to(device)
-        #                 tick_input_locs = encoding_input_locs[tick_idx].to(device)
-                        
-        #                 current_encoding_result = model.module.encoding(
-        #                 tick_input_images,
-        #                 tick_input_intrins,
-        #                 tick_input_extrins,
-        #                 tick_input_locs,
-        #                 is_train=False
-        #                 )
-
-        #                 if prev_encoding_result is None:
-        #                     model_output_dict = model.module.forward(
-        #                         current_encoding_result,
-        #                         current_encoding_result,
-        #                         bool_prev_pos_encoded=False
-        #                     )
-        #                 else:
-        #                     model_output_dict = model.module.forward(
-        #                         current_encoding_result,
-        #                         prev_encoding_result,
-        #                         bool_prev_pos_encoded=True
-        #                     )
-                        
-        #                 gt_tick = {
-        #                         'inputs': scenario_batch['ego']['inputs'][tick_idx],
-        #                         'extrinsic': scenario_batch['ego']['extrinsic'][tick_idx],
-        #                         'intrinsic': scenario_batch['ego']['intrinsic'][tick_idx],
-        #                         'gt_static': scenario_batch['ego']['gt_static'][tick_idx],
-        #                         'gt_dynamic': scenario_batch['ego']['gt_dynamic'][tick_idx],
-        #                         'transformation_matrix': scenario_batch['ego']['transformation_matrix'][tick_idx],
-        #                         'pairwise_t_matrix': scenario_batch['ego']['pairwise_t_matrix'][tick_idx],
-        #                         'record_len': scenario_batch['ego']['record_len'][tick_idx],
-        #                         'scenario_id': scenario_batch['ego']['scenario_id'][tick_idx],
-        #                         'agent_true_loc' : scenario_batch['ego']['agent_true_loc'][tick_idx],
-        #                         'cav_list' : scenario_batch['ego']['cav_list'][tick_idx],
-        #                         # 'dist_to_ego' : distance_all_batch,
-        #                         'single_bev' : scenario_batch['ego']['single_bev'][tick_idx],
-        #                         'timestamp_key' : scenario_batch['ego']['timestamp_key'][tick_idx]
-        #                 }
-                        
-        #                 batch_dict = {
-        #                                 'ego': {
-        #                                     k: v.unsqueeze(0) if torch.is_tensor(v) and v.ndim >= 1 else v
-        #                                     for k, v in gt_tick.items()
-        #                                 }
-        #                             }       ## torch.Size([1, 1, 1, 512, 512])
-                        
-        #                 ## model output static seg : torch.Size([1, 1, 3, 512, 512])
-        #                 ## model output dynamic seg : torch.Size([1, 1, 2, 512, 512])
-                        
-        #                 final_loss = criterion(model_output_dict, gt_tick)
-        #                 valid_ave_loss.append(final_loss.item())
-                        
-        #                 model_output_dict = \
-        #                     opencood_val_dataset.post_process(gt_tick,
-        #                                                         model_output_dict)      ## model output dict만 처리
+                for tick_idx in range(encoding_input_images.shape[0]):
+                    with torch.no_grad():
+                        with torch.cuda.amp.autocast():
+                            print(f"## Validation ## Scenario id : {scenario_id_check} || i : {i} || tick_idx : {tick_idx} // {encoding_input_images.shape[0]} || timestamp_key : {scenario_batch['ego']['timestamp_key'][tick_idx].squeeze().tolist()[0]}")
+                            tick_input_images = encoding_input_images[tick_idx].to(device)
+                            tick_input_intrins = encoding_input_intrins[tick_idx].to(device)
+                            tick_input_extrins = encoding_input_extrins[tick_idx].to(device)
+                            tick_input_locs = encoding_input_locs[tick_idx].to(device)
                             
-                        
-        #                 ## GT input shape : torch.Size([1, 5, 1, 4, 512, 512, 3])       ## agent_nums = 5 ==> max agents pdding이 됨
-        #                 ## GT static map : gt_static shape : torch.Size([1, 1, 1, 512, 512])
-        #                 ## model_output_dict input shape (static_map) : torch.Size([1, 512, 512])
-                        
-        #                 train_utils.save_bev_seg_binary(model_output_dict,              ## logs/ys_model_xxxxxx/train_vis
-        #                                                 batch_dict,
-        #                                                 saved_path,
-        #                                                 i,
-        #                                                 tick_idx,
-        #                                                 epoch)
-        #                 iou_cal = cal_iou_training(batch_dict,
-        #                                                 model_output_dict)
+                            current_encoding_result = model.module.encoding(
+                            tick_input_images,
+                            tick_input_intrins,
+                            tick_input_extrins,
+                            tick_input_locs,
+                            is_train=False
+                            )
 
-        #                 static_ave_iou.append(iou_cal[0])
-        #                 dynamic_ave_iou.append(iou_cal[1])
-        #                 # lane_ave_iou.append(iou_static[2])
-                        
-        #             prev_encoding_result = current_encoding_result.detach()
+                            if prev_encoding_result is None:
+                                model_output_dict = model.module.forward(
+                                    current_encoding_result,
+                                    current_encoding_result,
+                                    bool_prev_pos_encoded=False
+                                )
+                            else:
+                                model_output_dict = model.module.forward(
+                                    current_encoding_result,
+                                    prev_encoding_result,
+                                    bool_prev_pos_encoded=True
+                                )
+                            
+                            gt_tick = {
+                                    'inputs': scenario_batch['ego']['inputs'][tick_idx],
+                                    'extrinsic': scenario_batch['ego']['extrinsic'][tick_idx],
+                                    'intrinsic': scenario_batch['ego']['intrinsic'][tick_idx],
+                                    'gt_static': scenario_batch['ego']['gt_static'][tick_idx],
+                                    'gt_dynamic': scenario_batch['ego']['gt_dynamic'][tick_idx],
+                                    'transformation_matrix': scenario_batch['ego']['transformation_matrix'][tick_idx],
+                                    'pairwise_t_matrix': scenario_batch['ego']['pairwise_t_matrix'][tick_idx],
+                                    'record_len': scenario_batch['ego']['record_len'][tick_idx],
+                                    'scenario_id': scenario_batch['ego']['scenario_id'][tick_idx],
+                                    'agent_true_loc' : scenario_batch['ego']['agent_true_loc'][tick_idx],
+                                    'cav_list' : scenario_batch['ego']['cav_list'][tick_idx],
+                                    # 'dist_to_ego' : distance_all_batch,
+                                    'single_bev' : scenario_batch['ego']['single_bev'][tick_idx],
+                                    'timestamp_key' : scenario_batch['ego']['timestamp_key'][tick_idx]
+                            }
+                            
+                            batch_dict = {
+                                            'ego': {
+                                                k: v.unsqueeze(0) if torch.is_tensor(v) and v.ndim >= 1 else v
+                                                for k, v in gt_tick.items()
+                                            }
+                                        }       ## torch.Size([1, 1, 1, 512, 512])
+                            
+                            ## model output static seg : torch.Size([1, 1, 3, 512, 512])
+                            ## model output dynamic seg : torch.Size([1, 1, 2, 512, 512])
+                            
+                            final_loss = criterion(model_output_dict, gt_tick)
+                            valid_ave_loss.append(final_loss.item())
+                            
+                            model_output_dict = \
+                                opencood_val_dataset.post_process(gt_tick,
+                                                                    model_output_dict)      ## model output dict만 처리
+                                
+                            
+                            ## GT input shape : torch.Size([1, 5, 1, 4, 512, 512, 3])       ## agent_nums = 5 ==> max agents pdding이 됨
+                            ## GT static map : gt_static shape : torch.Size([1, 1, 1, 512, 512])
+                            ## model_output_dict input shape (static_map) : torch.Size([1, 512, 512])
+                            
+                            train_utils.save_bev_seg_binary(model_output_dict,              ## logs/ys_model_xxxxxx/train_vis
+                                                            batch_dict,
+                                                            saved_path,
+                                                            i,
+                                                            tick_idx,
+                                                            epoch)
+                            iou_cal = cal_iou_training(batch_dict,
+                                                            model_output_dict)
 
-        #     valid_ave_loss = statistics.mean(valid_ave_loss)
-        #     static_ave_iou = statistics.mean(static_ave_iou)
-        #     # lane_ave_iou = statistics.mean(lane_ave_iou)
-        #     dynamic_ave_iou = statistics.mean(dynamic_ave_iou)
+                            static_ave_iou.append(iou_cal[0])
+                            dynamic_ave_iou.append(iou_cal[1])
+                            # lane_ave_iou.append(iou_static[2])
+                            
+                        prev_encoding_result = current_encoding_result.detach()
+                        torch.cuda.empty_cache()  # ✅ tick마다 GPU 캐시 정리
 
-        #     print('At epoch %d, the validation loss is %f,'
-        #         'the dynamic iou is %f, t'
-        #         % (epoch,
-        #             valid_ave_loss,
-        #             dynamic_ave_iou,
-        #             ))
+            valid_ave_loss = statistics.mean(valid_ave_loss)
+            static_ave_iou = statistics.mean(static_ave_iou)
+            # lane_ave_iou = statistics.mean(lane_ave_iou)
+            dynamic_ave_iou = statistics.mean(dynamic_ave_iou)
 
-        #     writer.add_scalar('Validate_Loss', valid_ave_loss, epoch)
-        #     writer.add_scalar('Dynamic_Iou', dynamic_ave_iou, epoch)
-        #     writer.add_scalar('Road_IoU', static_ave_iou, epoch)
-        #         # writer.add_scalar('Lane_IoU', static_ave_iou, epoch)
+            print('At epoch %d, the validation loss is %f,'
+                'the dynamic iou is %f, t'
+                % (epoch,
+                    valid_ave_loss,
+                    dynamic_ave_iou,
+                    ))
 
-        # if epoch % hypes['train_params']['save_freq'] == 0:
-        #     torch.save(model_without_ddp.state_dict(),
-        #                os.path.join(saved_path,
-        #                             'net_epoch%d.pth' % (epoch + 1)))
+            writer.add_scalar('Validate_Loss', valid_ave_loss, epoch)
+            writer.add_scalar('Dynamic_Iou', dynamic_ave_iou, epoch)
+            writer.add_scalar('Road_IoU', static_ave_iou, epoch)
+                # writer.add_scalar('Lane_IoU', static_ave_iou, epoch)
+
+        if epoch % hypes['train_params']['save_freq'] == 0:
+            torch.save(model_without_ddp.state_dict(),
+                       os.path.join(saved_path,
+                                    'net_epoch%d.pth' % (epoch + 1)))
 
         # opencood_train_dataset.reinitialize()         ## cav 순서가 바뀌어 ego가 바뀌는 상황이 없으므로 reinitialize해줄 필요없음
 
