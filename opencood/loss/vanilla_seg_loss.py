@@ -75,9 +75,10 @@ class VanillaSegLoss(nn.Module):
             assert torch.isfinite(pos_loss).all(), f"pos_loss: {pos_loss}"
 
             dynamic_pred = rearrange(dynamic_pred, 'b l c h w -> (b l) c h w')
-            dynamic_pred = dynamic_pred.float()
             static_pred = rearrange(static_pred, 'b l c h w -> (b l) c h w')
-            static_pred = static_pred.float()
+
+            dynamic_gt = dynamic_gt.long()
+            static_gt = static_gt.long()
             
             # print("Before loss_func_dynamic")
             dynamic_loss = self.loss_func_dynamic(dynamic_pred, dynamic_gt)

@@ -209,35 +209,30 @@ def main():
              
             # scenario_batch : dictionary 
             model.train()
-                
-            ## collate batch를 거친 후의 값이므로 이미지 input을 예를 들면 [num_ticks, num_agents (ego 포함), 1, H, W C]
-            encoding_input_images = scenario_batch['ego']['inputs']         ## ex) INPUT IMAGES :  torch.Size([50, 5, 1, 4, 512, 512, 3])
-            encoding_input_intrins = scenario_batch['ego']['intrinsic']     ## INTRINSIC :  torch.Size([50, 5, 1, 4, 3, 3])
-            encoding_input_extrins = scenario_batch['ego']['extrinsic']     ## EXTRINSIC :  torch.Size([50, 5, 1, 4, 4, 4])
-            encoding_input_locs = scenario_batch['ego']['agent_true_loc']   ## Treu LOC : torch.Size([50, 5, 1, 6])
-                                                                            ## timestamp_key: torch.Size([50, 5, 1])
-            prev_encoding_result = None
             
-            # print(f"Scenario id : {scenario_id_check}")
-            # print("INPUT IMAGES : ", encoding_input_images.shape)   
-            # print("INTRINSIC : ", encoding_input_intrins.shape)   
-            # print("EXTRINSIC : ", encoding_input_extrins.shape) 
-            # print("POSITION : ", encoding_input_locs.shape)   
-            # print("timestamp_key:", scenario_batch['ego']['timestamp_key'].shape)
-
-            assert encoding_input_images.shape[0] == encoding_input_intrins.shape[0] == encoding_input_extrins.shape[0] == encoding_input_locs.shape[0], \
-                f"Batch size mismatch: images={encoding_input_images.shape[0]}, intrins={encoding_input_intrins.shape[0]}, extrins={encoding_input_extrins.shape[0]}, locs={encoding_input_locs.shape[0]}"
-        
+            prev_encoding_result = None
             accumulation_steps = 5
             
-            for tick_idx in range(encoding_input_images.shape[0]):
-                # print(f"Scenario id : {scenario_id_check} || tick_idx : {tick_idx} // {encoding_input_images.shape[0]} || timestamp_key : {scenario_batch['ego']['timestamp_key'][tick_idx].squeeze().tolist()[0]}")
-                tick_input_images = encoding_input_images[tick_idx].to(device)
-                tick_input_intrins = encoding_input_intrins[tick_idx].to(device)
-                tick_input_extrins = encoding_input_extrins[tick_idx].to(device)
-                tick_input_locs = encoding_input_locs[tick_idx].to(device)
+            record_len = scenario_batch['ego']['record_len']
+            for tick_idx in range(record_len):
+                ## For checking the timestamp value
+                # ts_value = scenario_batch['ego']['timestamp_key'][tick_idx].squeeze().tolist()
+                # if isinstance(ts_value, list):
+                #     timestamp = ts_value[0]
+                # else:
+                #     timestamp = ts_value
+                # print(f"Scenario id : {scenario_id_check} || tick_idx : {tick_idx} // {record_len} || timestamp_key : {timestamp}")
+               
+                tick_input_images = scenario_batch['ego']['inputs'][tick_idx].to(device)        ## [num_agents, num_cams, H, H, C]
+                tick_input_intrins = scenario_batch['ego']['intrinsic'][tick_idx].to(device)    ## [num_agents, num_cams, 3, 3]
+                tick_input_extrins = scenario_batch['ego']['extrinsic'][tick_idx].to(device)    ## [num_agents, num_cams, 4, 4]
+                tick_input_locs = scenario_batch['ego']['agent_true_loc'][tick_idx].to(device)  ## [num_agents, 6]
                 
-                # print(f'Before Padding Remove : {tick_input_images.shape}')
+                ## Batch는 1 고정이므로 Encoding shape에 맞게 unsqueeze
+                tick_input_images = tick_input_images.unsqueeze(1)          ## [num_agents, 1, num_cams, H, H, C]
+                tick_input_intrins = tick_input_intrins.unsqueeze(1)        ## [num_agents, 1, num_cams, 3, 3]
+                tick_input_extrins = tick_input_extrins.unsqueeze(1)        ## [num_agents, 1, num_cams, 4, 4]
+                tick_input_locs = tick_input_locs.unsqueeze(1)              ## [num_agents, 1, 6]
                 
                 if not opt.half:        ## half가 설정 되어있지 않은 경우 (FP32로 계산)
                     current_encoding_result = model.module.encoding(
@@ -266,8 +261,8 @@ def main():
                     ## 이전에는 tick별 처리로 batch_data로 처리하였지만, 현재는 scenario_batch로 처리하기 떄문에
                     ## vanila_seg_loss를 위한 임시 dictionary를 생성해줘야함
                     gt_tick = {
-                        'gt_static' : scenario_batch['ego']['gt_static'][tick_idx].to(device),
-                        'gt_dynamic' : scenario_batch['ego']['gt_dynamic'][tick_idx].to(device)
+                        'gt_static' : torch.from_numpy(scenario_batch['ego']['gt_static'][tick_idx]).unsqueeze(1).to(device),
+                        'gt_dynamic' : torch.from_numpy(scenario_batch['ego']['gt_dynamic'][tick_idx]).unsqueeze(1).to(device)
                     }
                     
                     final_loss = criterion(model_output_dict, gt_tick)
@@ -300,8 +295,8 @@ def main():
                         ## 이전에는 tick별 처리로 batch_data로 처리하였지만, 현재는 scenario_batch로 처리하기 떄문에
                         ## vanila_seg_loss를 위한 임시 dictionary를 생성해줘야함
                         gt_tick = {
-                            'gt_static' : scenario_batch['ego']['gt_static'][tick_idx].to(device),
-                            'gt_dynamic' : scenario_batch['ego']['gt_dynamic'][tick_idx].to(device)
+                            'gt_static' : torch.from_numpy(scenario_batch['ego']['gt_static'][tick_idx]).unsqueeze(1).to(device),
+                            'gt_dynamic' : torch.from_numpy(scenario_batch['ego']['gt_dynamic'][tick_idx]).unsqueeze(1).to(device)
                         }
                         
                         # print(f"GT STatic Unique : {torch.unique(gt_tick['gt_static'])}")
@@ -349,6 +344,7 @@ def main():
         현재는 속도가 느린 관계로 Distributed에 일부만 save하는 것으로함 
         """
         if epoch != 0 and epoch % hypes['train_params']['eval_freq'] == 0: 
+            
             valid_ave_loss = []
             static_ave_iou = []
             dynamic_ave_iou = []
@@ -357,23 +353,23 @@ def main():
                 scenario_id_check = scenario_batch['ego']['scenario_id'][0]
                 model.eval()
 
-                scenario_batch = train_utils.to_device(scenario_batch, device)
-
-                encoding_input_images = scenario_batch['ego']['inputs']
-                encoding_input_intrins = scenario_batch['ego']['intrinsic']
-                encoding_input_extrins = scenario_batch['ego']['extrinsic']
-                encoding_input_locs = scenario_batch['ego']['agent_true_loc']
-
                 prev_encoding_result = None
+                record_len = scenario_batch['ego']['record_len']
                 
-                for tick_idx in range(encoding_input_images.shape[0]):
+                for tick_idx in range(record_len):
                     with torch.no_grad():
                         with torch.cuda.amp.autocast():
-                            print(f"## Validation ## Scenario id : {scenario_id_check} || i : {i} || tick_idx : {tick_idx} // {encoding_input_images.shape[0]} || timestamp_key : {scenario_batch['ego']['timestamp_key'][tick_idx].squeeze().tolist()[0]}")
-                            tick_input_images = encoding_input_images[tick_idx].to(device)
-                            tick_input_intrins = encoding_input_intrins[tick_idx].to(device)
-                            tick_input_extrins = encoding_input_extrins[tick_idx].to(device)
-                            tick_input_locs = encoding_input_locs[tick_idx].to(device)
+                            # print(f"## Validation ## Scenario id : {scenario_id_check} || i : {i} || tick_idx : {tick_idx} // {record_len} || timestamp_key : {scenario_batch['ego']['timestamp_key'][tick_idx].squeeze().tolist()[0]}")
+                            tick_input_images = scenario_batch['ego']['inputs'][tick_idx].to(device)        ## [num_agents, num_cams, H, H, C]
+                            tick_input_intrins = scenario_batch['ego']['intrinsic'][tick_idx].to(device)    ## [num_agents, num_cams, 3, 3]
+                            tick_input_extrins = scenario_batch['ego']['extrinsic'][tick_idx].to(device)    ## [num_agents, num_cams, 4, 4]
+                            tick_input_locs = scenario_batch['ego']['agent_true_loc'][tick_idx].to(device)  ## [num_agents, 6]
+                            
+                            # Batch는 1 고정이므로 Encoding shape에 맞게 unsqueeze
+                            tick_input_images = tick_input_images.unsqueeze(1)          ## [num_agents, 1, num_cams, H, H, C]
+                            tick_input_intrins = tick_input_intrins.unsqueeze(1)        ## [num_agents, 1, num_cams, 3, 3]
+                            tick_input_extrins = tick_input_extrins.unsqueeze(1)        ## [num_agents, 1, num_cams, 4, 4]
+                            tick_input_locs = tick_input_locs.unsqueeze(1)              ## [num_agents, 1, 6]
                             
                             current_encoding_result = model.module.encoding(
                             tick_input_images,
@@ -397,20 +393,20 @@ def main():
                                 )
                             
                             gt_tick = {
-                                    'inputs': scenario_batch['ego']['inputs'][tick_idx],
-                                    'extrinsic': scenario_batch['ego']['extrinsic'][tick_idx],
-                                    'intrinsic': scenario_batch['ego']['intrinsic'][tick_idx],
-                                    'gt_static': scenario_batch['ego']['gt_static'][tick_idx],
-                                    'gt_dynamic': scenario_batch['ego']['gt_dynamic'][tick_idx],
-                                    'transformation_matrix': scenario_batch['ego']['transformation_matrix'][tick_idx],
-                                    'pairwise_t_matrix': scenario_batch['ego']['pairwise_t_matrix'][tick_idx],
-                                    'record_len': scenario_batch['ego']['record_len'][tick_idx],
+                                    'inputs': (scenario_batch['ego']['inputs'][tick_idx]).unsqueeze(1).to(device),
+                                    'extrinsic': (scenario_batch['ego']['extrinsic'][tick_idx]).unsqueeze(1).to(device),
+                                    'intrinsic': (scenario_batch['ego']['intrinsic'][tick_idx]).unsqueeze(1).to(device),
+                                    'gt_static': torch.from_numpy(scenario_batch['ego']['gt_static'][tick_idx]).unsqueeze(1).to(device),
+                                    'gt_dynamic': torch.from_numpy(scenario_batch['ego']['gt_dynamic'][tick_idx]).unsqueeze(1).to(device),
+                                    'transformation_matrix': torch.from_numpy(scenario_batch['ego']['transformation_matrix'][tick_idx]).unsqueeze(1).to(device),
+                                    'pairwise_t_matrix': torch.from_numpy(scenario_batch['ego']['pairwise_t_matrix'][tick_idx]).unsqueeze(1).to(device),
+                                    # 'record_len': scenario_batch['ego']['record_len'][tick_idx].unsqueeze(1).to(device),
                                     'scenario_id': scenario_batch['ego']['scenario_id'][tick_idx],
-                                    'agent_true_loc' : scenario_batch['ego']['agent_true_loc'][tick_idx],
-                                    'cav_list' : scenario_batch['ego']['cav_list'][tick_idx],
+                                    'agent_true_loc' : (scenario_batch['ego']['agent_true_loc'][tick_idx]).unsqueeze(1).to(device),
+                                    'cav_list' : (scenario_batch['ego']['cav_list'][tick_idx]),
                                     # 'dist_to_ego' : distance_all_batch,
-                                    'single_bev' : scenario_batch['ego']['single_bev'][tick_idx],
-                                    'timestamp_key' : scenario_batch['ego']['timestamp_key'][tick_idx]
+                                    'single_bev' : torch.from_numpy(scenario_batch['ego']['single_bev'][tick_idx]).unsqueeze(1).to(device),
+                                    'timestamp_key' : torch.from_numpy(scenario_batch['ego']['timestamp_key'][tick_idx]).unsqueeze(1).to(device)
                             }
                             
                             batch_dict = {
@@ -456,12 +452,14 @@ def main():
             # lane_ave_iou = statistics.mean(lane_ave_iou)
             dynamic_ave_iou = statistics.mean(dynamic_ave_iou)
 
+            print('-'*100)
             print('At epoch %d, the validation loss is %f,'
                 'the dynamic iou is %f, t'
                 % (epoch,
                     valid_ave_loss,
                     dynamic_ave_iou,
                     ))
+            print('-'*100)
 
             writer.add_scalar('Validate_Loss', valid_ave_loss, epoch)
             writer.add_scalar('Dynamic_Iou', dynamic_ave_iou, epoch)

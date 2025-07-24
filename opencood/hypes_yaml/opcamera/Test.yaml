@@ -5,8 +5,8 @@ validate_dir: '/scratch/sglee6/opv2v_dataset/validate'
 train_params:
   batch_size: &batch_size 1
   epoches: &epoches 100
-  eval_freq: 1
-  save_freq: 1
+  eval_freq: 10
+  save_freq: 10
   max_cav: &max_cav 7
   visible: False
 
@@ -17,8 +17,7 @@ fusion:
 data_augment: []
 add_data_extension: ['bev_dynamic.png', 'bev_static.png', 'bev_lane.png', 'bev_visibility.png', 'bev_visibility_corp.png','merged_bev_dynamic.png','merged_bev_static.png','merged_bev_lane.png']
 label_generation : false ## true or false
-max_padding_cavs : 7
-chunk_size : 20
+chunk_size : 10
 
 # preprocess-related
 preprocess:

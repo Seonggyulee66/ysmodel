@@ -74,7 +74,7 @@ class CamIntermediateFusionDataset_per_scenario(base_camera_dataset.BaseCameraDa
 
         pairwise_t_matrix = \
             self.get_pairwise_transformation(data_sample,
-                                             self.params['train_params']['max_cav'])
+                                             self.params['train_params']['max_cav'])        ## (max_cav, max_cav, 4, 4)
 
         # Final shape: (L, M, H, W, 3)
         camera_data = []
@@ -138,13 +138,7 @@ class CamIntermediateFusionDataset_per_scenario(base_camera_dataset.BaseCameraDa
 
         gt_dynamic = np.stack(gt_dynamic)
         gt_static = np.stack(gt_static)
-
-        # padding
         transformation_matrix = np.stack(transformation_matrix)
-        padding_eye = np.tile(np.eye(4)[None], (self.max_cav - len(
-                                               transformation_matrix), 1, 1))
-        transformation_matrix = np.concatenate(
-            [transformation_matrix, padding_eye], axis=0)
 
         processed_data_dict['ego'].update({
             'transformation_matrix': transformation_matrix,
@@ -158,7 +152,7 @@ class CamIntermediateFusionDataset_per_scenario(base_camera_dataset.BaseCameraDa
             'agent_true_loc' : agent_true_loc,
             'cav_list' : cav_list,
             # 'dist_to_ego' : distance_stack,
-            'single_bev_imgae' : single_bev_image,
+            'single_bev_image' : single_bev_image,
             'timestamp_key' : timestamp_key})
 
         return processed_data_dict
@@ -315,20 +309,20 @@ class CamIntermediateFusionDataset_per_scenario(base_camera_dataset.BaseCameraDa
         output_dict = {'ego': {}}
 
         cam_rgb_all_batch = []
-        cam_to_ego_all_batch = []
         cam_intrinsic_all_batch = []
+        cam_extrinsic_all_batch = []
         gt_static_all_batch = []
         gt_dynamic_all_batch = []
         transformation_matrix_all_batch = []
         pairwise_t_matrix_all_batch = []
-        record_len = []
+        num_agents = []
         senario_id_all_batch = []
         agent_true_loc_all_batch = []
         cav_list_all_batch = []
         single_bev_all_batch = []
         timestamp_all_batch = []
 
-        for tick_dict in scenario_sequence:
+        for i,tick_dict in enumerate(scenario_sequence):
             ego_dict = tick_dict['ego']
 
             camera_data = ego_dict['camera_data']
@@ -337,24 +331,13 @@ class CamIntermediateFusionDataset_per_scenario(base_camera_dataset.BaseCameraDa
             agent_true_loc = ego_dict['agent_true_loc']
 
             current_agents = camera_data.shape[0]
-            record_len.append(current_agents)
+            num_agents.append(current_agents)
 
-            # ✅ padding
-            cam_data_padded = self.pad_agents(camera_data, self.max_padding_cavs, camera_data.shape[1:])       ## ex) cam_data_padded : (5, 4, 512, 512, 3)
-            cam_intrinsic_padded = self.pad_agents(camera_intrinsic, self.max_padding_cavs, camera_intrinsic.shape[1:])
-            cam_extrinsic_padded = self.pad_agents(camera_extrinsic, self.max_padding_cavs, camera_extrinsic.shape[1:])
-            agent_true_loc_padded = self.pad_agents(agent_true_loc, self.max_padding_cavs, agent_true_loc.shape[1:])
-            single_bev_padded = self.pad_agents(ego_dict['single_bev_imgae'],self.max_padding_cavs, ego_dict['single_bev_imgae'].shape[1:])
-            timestamp_padded = self.pad_agents(ego_dict['timestamp_key'],self.max_padding_cavs, ego_dict['timestamp_key'].shape[1:])
+            cam_rgb_all_batch.append(torch.from_numpy(camera_data))
+            cam_intrinsic_all_batch.append(torch.from_numpy(camera_intrinsic))
+            cam_extrinsic_all_batch.append(torch.from_numpy(camera_extrinsic))
+            agent_true_loc_all_batch.append(torch.from_numpy(agent_true_loc))
 
-            cam_rgb_all_batch.append(cam_data_padded)
-            cam_intrinsic_all_batch.append(cam_intrinsic_padded)
-            cam_to_ego_all_batch.append(cam_extrinsic_padded)
-            agent_true_loc_all_batch.append(agent_true_loc_padded)
-            single_bev_all_batch.append(single_bev_padded)
-            timestamp_all_batch.append(timestamp_padded)
-
-            # 그대로
             gt_static_all_batch.append(ego_dict['gt_static'])
             gt_dynamic_all_batch.append(ego_dict['gt_dynamic'])
             transformation_matrix_all_batch.append(ego_dict['transformation_matrix'])
@@ -362,46 +345,42 @@ class CamIntermediateFusionDataset_per_scenario(base_camera_dataset.BaseCameraDa
             cav_list_all_batch.append(ego_dict['cav_list'])
             pairwise_t_matrix_all_batch.append(ego_dict['pairwise_t_matrix'])
 
-        cam_rgb_all_batch = torch.from_numpy(
-            np.stack(cam_rgb_all_batch, axis=0)).unsqueeze(2).float()
-        cam_intrinsic_all_batch = torch.from_numpy(
-            np.stack(cam_intrinsic_all_batch, axis=0)).unsqueeze(2).float()
-        cam_to_ego_all_batch = torch.from_numpy(
-            np.stack(cam_to_ego_all_batch, axis=0)).unsqueeze(2).float()
-        agent_true_loc_all_batch = torch.from_numpy(
-            np.stack(agent_true_loc_all_batch, axis=0)).unsqueeze(2).float()
-        single_bev_all_batch = torch.from_numpy(
-            np.stack(single_bev_all_batch, axis=0)).unsqueeze(2).float()
-        timestamp_all_batch = torch.from_numpy(
-            np.stack(timestamp_all_batch, axis=0)).unsqueeze(2).float()     ## ex) tensor([[[368.],[368.], [  0.],[  0.],[  0.]]])
+            single_bev_all_batch.append(ego_dict['single_bev_image'])
+            timestamp_all_batch.append(ego_dict['timestamp_key'])     
 
-        record_len = torch.from_numpy(np.array(record_len, dtype=int))
-        gt_static_all_batch = torch.from_numpy(
-            np.stack(gt_static_all_batch)).unsqueeze(1).long()
-        gt_dynamic_all_batch = torch.from_numpy(
-            np.stack(gt_dynamic_all_batch)).unsqueeze(1).long()
-        transformation_matrix_all_batch = torch.from_numpy(
-            np.stack(transformation_matrix_all_batch)).float()
-        pairwise_t_matrix_all_batch = torch.from_numpy(
-            np.stack(pairwise_t_matrix_all_batch)).float()
-        senario_id_all_batch = torch.from_numpy(
-            np.stack(senario_id_all_batch)).float()
+        num_agents_list = torch.from_numpy(np.array(num_agents, dtype=int))
         
-
+        # print(f"idx : {i} || cam rgb all batch : {(cam_rgb_all_batch[0].shape)}")   
+        # print(f"idx : {i} || cam extrinsic all batch : {(cam_extrinsic_all_batch[0].shape)}")
+        # print(f"idx : {i} || cam instrinsic all batch: {(cam_intrinsic_all_batch[0].shape)}")
+        # print(f"idx : {i} || gt static all batch : {(gt_static_all_batch[0].shape)}")
+        # print(f"idx : {i} || gt dynamic all batch : {(gt_dynamic_all_batch[0].shape)}")
+        # print(f"idx : {i} || T matrix all batch : {(transformation_matrix_all_batch[0].shape)}")
+        # print(f"idx : {i} || pairwise t matrix all batch : {(pairwise_t_matrix_all_batch[0].shape)}")
+        # print(f"idx : {i} || num agents all batch : {(num_agents_list[0])}")
+        # print(f"idx : {i} || record len : {len(num_agents_list)}")
+        # print(f"idx : {i} || scenario id all batch : {(senario_id_all_batch[0])}")
+        # print(f"idx : {i} || agent true loc all batch : {(agent_true_loc_all_batch[0].shape)}")
+        # print(f"idx : {i} || cav list all batch : {(len(cav_list_all_batch[0]))}")
+        # print(f"idx : {i} || single bev all batch : {(single_bev_all_batch[0].shape)}")
+        # print(f"idx : {i} || timestamp all batch : {(timestamp_all_batch[0].shape)}")
+        
+        ### outputs은 모두 list ==> len()은 number of ticks 
         output_dict['ego'].update({
-            'inputs': cam_rgb_all_batch,
-            'extrinsic': cam_to_ego_all_batch,
-            'intrinsic': cam_intrinsic_all_batch,
-            'gt_static': gt_static_all_batch,
-            'gt_dynamic': gt_dynamic_all_batch,
-            'transformation_matrix': transformation_matrix_all_batch,
-            'pairwise_t_matrix': pairwise_t_matrix_all_batch,
-            'record_len': record_len,
-            'scenario_id': senario_id_all_batch,
-            'agent_true_loc': agent_true_loc_all_batch,
-            'cav_list': cav_list_all_batch,
-            'single_bev': single_bev_all_batch,
-            'timestamp_key': timestamp_all_batch
+            'inputs': cam_rgb_all_batch,            ## cam rgb all batch : torch.Size([2, 4, 512, 512, 3])  || [[num_agents, num_cams, H, W, C], ...]
+            'extrinsic': cam_extrinsic_all_batch,   ## cam extrinsic all batch : torch.Size([2, 4, 4, 4])   || [[num_agents, 4,4,4], ....]
+            'intrinsic': cam_intrinsic_all_batch,   ## cam instrinsic all batch: torch.Size([2, 4, 3, 3])   || [[num_agents, 4,3,3], ....]
+            'gt_static': gt_static_all_batch,       ## gt static all batch : (1, 512, 512)                  || [[1,512,512], ..]
+            'gt_dynamic': gt_dynamic_all_batch,     ## gt dynamic all batch : (1, 512, 512)                 || [[1,512,512], ..]
+            'transformation_matrix': transformation_matrix_all_batch,   ## transformation matrix all batch : (2, 4, 4)      || [[num_agents, 4, 4], ....]
+            'pairwise_t_matrix': pairwise_t_matrix_all_batch,           ## pairwise t matrix all batch : (7, 7, 4, 4)       || [[max_cav, max_cav, 4,4], ...]
+            'num_agents_list': num_agents_list,                         ## || [2,2,2,3, ...]
+            'record_len' : len(num_agents_list),                        ## chunck scenario number of ticks || 8
+            'scenario_id': senario_id_all_batch,                        ## || [33,33,33 ...]
+            'agent_true_loc': agent_true_loc_all_batch,                 ## agent true loc all batch : torch.Size([2, 6])    || [[num_agents, 6], ...]
+            'cav_list': cav_list_all_batch,                             ## || [[cav_id0, cav_id1], ...]
+            'single_bev': single_bev_all_batch,                         ## single bev all batch : (2, 256, 256) || [[num_agents, 256, 256], ...]
+            'timestamp_key': timestamp_all_batch                        ## timestamp all batch : (2,)->num_agents       || [[tick, tick], ....]
         })
 
         return output_dict

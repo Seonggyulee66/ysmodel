@@ -122,18 +122,45 @@ def suppress_stdout():
         finally:
             sys.stdout = old_stdout
 
+# @torch.no_grad()
+# def get_pixel_coords_3d(coords_d, depth, cam_param, img_h=256, img_w=256, depth_num=64, depth_start=1, depth_max=61):
+#     eps = 1e-5
+#     B, N = cam_param.shape[:2]
+#     H, W = depth.shape[-2:]
+#     scale = img_h // H
+#     # coords_h = torch.linspace(scale // 2, img_h - scale//2, H, device=depth.device).float()
+#     # coords_w = torch.linspace(scale // 2, img_w - scale//2, W, device=depth.device).float()
+#     coords_h = torch.linspace(0, 1, H, device=cam_param.device,dtype=torch.float32) * img_h
+#     coords_w = torch.linspace(0, 1, W, device=cam_param.device,dtype=torch.float32) * img_w
+#     # coords_d = get_bin_centers(depth_max, depth_start, depth_num).to(depth.device)
+#     # coords_d = coords_d * bin_scale + bin_bias
+
+#     D = coords_d.shape[0]
+#     coords_d = coords_d.to(cam_param.device,dtype=torch.float32)
+#     coords = torch.stack(torch.meshgrid([coords_w, coords_h, coords_d])).permute(1, 2, 3, 0) # W, H, D, 3
+#     coords = torch.cat((coords, torch.ones_like(coords[..., :1])), -1)
+#     coords[..., :2] = coords[..., :2] * torch.maximum(coords[..., 2:3], torch.ones_like(coords[..., 2:3])*eps)
+#     coords = coords.view(1, 1, W, H, D, 4, 1).repeat(B, N, 1, 1, 1, 1, 1)
+#     imgs = cam_param.view(B, N, 1, 1, 1, 4, 4).repeat(1, 1, W, H, D, 1, 1)
+#     coords3d = torch.matmul(imgs, coords).squeeze(-1)[..., :3] # B N W H D 3
+
+#     return coords3d, coords_d
+
 @torch.no_grad()
-def get_pixel_coords_3d(coords_d, depth, cam_param, img_h=256, img_w=256, depth_num=64, depth_start=1, depth_max=61):
+def get_pixel_coords_3d(coords_d, depth, cam_param,
+                        img_h=256, img_w=256, depth_num=64, depth_start=1, depth_max=61):
     eps = 1e-5
     B, N = cam_param.shape[:2]
     H, W = depth.shape[-2:]
     scale = img_h // H
-    # coords_h = torch.linspace(scale // 2, img_h - scale//2, H, device=depth.device).float()
-    # coords_w = torch.linspace(scale // 2, img_w - scale//2, W, device=depth.device).float()
-    coords_h = torch.linspace(0, 1, H, device=cam_param.device).float() * img_h
-    coords_w = torch.linspace(0, 1, W, device=cam_param.device).float() * img_w
-    # coords_d = get_bin_centers(depth_max, depth_start, depth_num).to(depth.device)
-    # coords_d = coords_d * bin_scale + bin_bias
+
+    # Define dtype and device from cam_param
+    dtype = cam_param.dtype
+    device = cam_param.device
+
+    coords_h = torch.linspace(0, 1, H, device=device, dtype=dtype) * img_h
+    coords_w = torch.linspace(0, 1, W, device=device, dtype=dtype) * img_w
+    coords_d = coords_d.to(device=device, dtype=dtype)
 
     D = coords_d.shape[0]
     coords_d = coords_d.to(cam_param.device)
@@ -145,6 +172,7 @@ def get_pixel_coords_3d(coords_d, depth, cam_param, img_h=256, img_w=256, depth_
     coords3d = torch.matmul(imgs, coords).squeeze(-1)[..., :3] # B N W H D 3
 
     return coords3d, coords_d
+
 
 class CamEncode(nn.Module):
     def __init__(self, C, depth_num=64, depth_start=1, depth_end=61, error_tolerance=1.0, img_h=256, img_w=256, in_channels=[256, 512, 1024, 2048],interm_c= 128,out_c: Optional[int] = 3):
@@ -419,6 +447,7 @@ class LSS(nn.Module):
         else:
             combine = rots.matmul(torch.inverse(intrins))
             
+        # points = points.to(dtype=combine.dtype)
         points = combine.view(B, N, 1, 1, 1, 3, 3).matmul(points).squeeze(-1)
         # get the final (x,y,z) locations in the ego frame
         points += trans.view(B, N, 1, 1, 1, 3)
@@ -574,20 +603,21 @@ def get_rot(h):
         [-np.sin(h), np.cos(h)],
     ])
 
+
 def img_transform(img, post_rot, post_tran, resize, resize_dims, crop, flip, rotate):
-    # adjust image
-    img_transform = transforms.Resize(resize_dims)
-    img = img_transform(img)
+    img = transforms.Resize(resize_dims)(img)
     img = Func.crop(img, crop[1], crop[0], crop[3] - crop[1], crop[2] - crop[0])
     if flip:
         img = Func.hflip(img)
     img = Func.rotate(img, angle=rotate)
 
-    # get device and dtype
     device = post_rot.device
     dtype = post_rot.dtype
 
-    # post-homography transformation
+    # Cast scalar to tensor of correct dtype
+    resize = torch.tensor(resize, dtype=dtype, device=device)
+    rotate = torch.tensor(rotate, dtype=dtype, device=device)
+
     post_rot = post_rot * resize
     post_tran = post_tran - torch.as_tensor(crop[:2], dtype=dtype, device=device)
 
@@ -605,36 +635,32 @@ def img_transform(img, post_rot, post_tran, resize, resize_dims, crop, flip, rot
 
     return img, post_rot, post_tran
 
-
 def sample_augmentation(data_aug_conf, is_train=True):
     H, W = data_aug_conf['H'], data_aug_conf['W']
     fH, fW = data_aug_conf['final_dim'][0], data_aug_conf['final_dim'][1]
     if is_train:
-        resize = np.random.uniform(*data_aug_conf['resize_lim'])
+        resize = float(np.random.uniform(*data_aug_conf['resize_lim']))
         resize_dims = (int(W*resize), int(H*resize))
         newW, newH = resize_dims
-        crop_h = int((1 - np.random.uniform(*data_aug_conf['bot_pct_lim']))*newH) - fH
+        crop_h = int((1 - float(np.random.uniform(*data_aug_conf['bot_pct_lim']))) * newH) - fH
         crop_w = int(np.random.uniform(0, max(0, newW - fW)))
         crop = (crop_w, crop_h, crop_w + fW, crop_h + fH)
-        flip = False
-        if data_aug_conf['rand_flip'] and np.random.choice([0, 1]):
-            flip = True
-        rotate = np.random.uniform(*data_aug_conf['rot_lim'])
-
+        flip = bool(data_aug_conf['rand_flip'] and np.random.choice([0, 1]))
+        rotate = float(np.random.uniform(*data_aug_conf['rot_lim']))
     else:
-        resize = max(fH/H, fW/W)
+        resize = float(max(fH/H, fW/W))
         resize_dims = (int(W*resize), int(H*resize))
         newW, newH = resize_dims
-        crop_h = int((1 - np.mean(data_aug_conf['bot_pct_lim']))*newH) - fH
+        crop_h = int((1 - float(np.mean(data_aug_conf['bot_pct_lim']))) * newH) - fH
         crop_w = int(max(0, newW - fW) / 2)
         crop = (crop_w, crop_h, crop_w + fW, crop_h + fH)
         flip = False
-        rotate = 0
+        rotate = 0.0
     return resize, resize_dims, crop, flip, rotate
 
 
 def Encoding(img_inputs, intrinsics, extrinsics, data_aug_conf, grid_conf, is_train=True):
-    N, B, M, H, W, C = img_inputs.shape
+    L, B, M, H, W, C = img_inputs.shape
     device = data_aug_conf['device']
     all_imgs = []
     all_rots = []
@@ -643,7 +669,7 @@ def Encoding(img_inputs, intrinsics, extrinsics, data_aug_conf, grid_conf, is_tr
     all_post_rots = []
     all_post_trans = []
 
-    for i in range(img_inputs.shape[0]):
+    for i in range(L):
         # print("AGENT", i)
         imgs = []
         rots = []
@@ -664,21 +690,20 @@ def Encoding(img_inputs, intrinsics, extrinsics, data_aug_conf, grid_conf, is_tr
 
             for j in range(int(data_aug_conf['Ncams'])):
                 # print("CAMERA")
-                img = img_inputs[i][k][j]
-                img = img.permute(2, 0, 1)
-                post_rot = torch.eye(2)
-                post_tran = torch.zeros(2)
-                extrin, intrin = extrinsics[i][k][j], intrinsics[i][k][j]
+                img = img_inputs[i][k][j].float()       ## [H,W,C]
+                img = img.permute(2, 0, 1)      ## [C, H, W]
+                post_rot = torch.eye(2,dtype=torch.float)
+                post_tran = torch.zeros(2,dtype = torch.float)
+                extrin, intrin = extrinsics[i][k][j].float(), intrinsics[i][k][j].float()
                 # 안전하게 as_tensor를 사용해 장치 정보 유지
-                intrin = torch.as_tensor(intrin)
-                rot = torch.as_tensor(extrin[:3, :3])
-                tran = torch.as_tensor(extrin[:3, 3])
+                intrin = torch.as_tensor(intrin, dtype=torch.float)
+                rot = torch.as_tensor(extrin[:3, :3], dtype=torch.float)
+                tran = torch.as_tensor(extrin[:3, 3], dtype=torch.float)
 
                 resize, resize_dims, crop, flip, rotate = sample_augmentation(data_aug_conf, is_train)
-                img, post_rot2, post_tran2 = img_transform(img, post_rot, post_tran, resize, resize_dims, crop, flip, rotate)
-
-                post_tran = torch.zeros(3)
-                post_rot = torch.eye(3)
+                img, post_rot2, post_tran2 = img_transform(img, post_rot, post_tran, resize, resize_dims, crop, flip, rotate)   ## shape || img : [3, 256, 256] post_rot2 : [2,2] post_trans2 : [2]
+                post_tran = torch.zeros(3,dtype=torch.float)
+                post_rot = torch.eye(3,dtype=torch.float)
                 post_tran[:2] = post_tran2
                 post_rot[:2, :2] = post_rot2
 
@@ -689,21 +714,20 @@ def Encoding(img_inputs, intrinsics, extrinsics, data_aug_conf, grid_conf, is_tr
                 batch_post_rots.append(post_rot)
                 batch_post_trans.append(post_tran)
             
-            imgs.append(torch.stack(batch_imgs))
+            imgs.append(torch.stack(batch_imgs))    ## torch.stack(batch_imgs) : [4, 3, 256, 256]  || [num_cams, C, h, w]
             rots.append(torch.stack(batch_rots))
             trans.append(torch.stack(batch_trans))
             intrins.append(torch.stack(batch_intrins))
             post_rots.append(torch.stack(batch_post_rots))
             post_trans.append(torch.stack(batch_post_trans))
 
-        all_imgs.append(torch.stack(imgs))
-        all_rots.append(torch.stack(rots))
-        all_trans.append(torch.stack(trans))
-        all_intrins.append(torch.stack(intrins))
-        all_post_rots.append(torch.stack(post_rots))
-        all_post_trans.append(torch.stack(post_trans))
-
-    valid_mask = (img_inputs.abs().sum(dim=[2,3,4,5]) > 0.).float().to(device)
+        all_imgs.append(torch.stack(imgs))              ## torch.stack(imgs) : [1, 4, 3, 256,256]  || [Batch, num_cams, C, h, w]
+        all_rots.append(torch.stack(rots))              ## torch.Size([1, 4, 3, 3])
+        all_trans.append(torch.stack(trans))            ## torch.Size([1, 4, 3])
+        all_intrins.append(torch.stack(intrins))        ## torch.Size([1, 4, 3, 3])
+        all_post_rots.append(torch.stack(post_rots))    ## torch.Size([1, 4, 3, 3])
+        all_post_trans.append(torch.stack(post_trans))  ## torch.Size([1, 4, 3])
+    
     encoding_model = LSS(grid_conf, data_aug_conf).to(device)
     
     encoded_bev, vis_encoded_bev = encoding_model(
@@ -716,7 +740,7 @@ def Encoding(img_inputs, intrinsics, extrinsics, data_aug_conf, grid_conf, is_tr
         extrinsics.to(device)
     )
 
-    return encoded_bev, vis_encoded_bev, valid_mask
+    return encoded_bev, vis_encoded_bev
 
 # 간단한 BEV 시각화 함수
 def visualize_bev(bev_feat, title='BEV', save=False):
@@ -742,29 +766,32 @@ def get_relative_pose(ego_pose, agent_pose):
     return dx, dy, dyaw
 
 def warp_and_paste_into_large_bev(canvas, bev_feat, dx, dy, dyaw, voxel_size=0.5):
-
     C, H, W = bev_feat.shape
     H_big, W_big = canvas.shape[2:]
     device = bev_feat.device
+    dtype = bev_feat.dtype  # 모든 텐서의 dtype을 이걸로 맞춰줍니다.
 
     # 소스 pixel 좌표 (중심 정렬 → meter로 변환)
-    xs = torch.arange(W, device=device)
-    ys = torch.arange(H, device=device)
+    xs = torch.arange(W, device=device, dtype=dtype)
+    ys = torch.arange(H, device=device, dtype=dtype)
     grid_y, grid_x = torch.meshgrid(ys, xs, indexing='ij')
-    coords = torch.stack([grid_x, grid_y], dim=0).float()  # (2, H, W)
-    coords -= torch.tensor([W / 2, H / 2], device=device).view(2, 1, 1)
+    coords = torch.stack([grid_x, grid_y], dim=0)  # (2, H, W)
+    coords -= torch.tensor([W / 2, H / 2], device=device, dtype=dtype).view(2, 1, 1)
     coords *= voxel_size  # pixel → meter
 
     # 회전
-    cos_theta = torch.cos(dyaw)
-    sin_theta = torch.sin(dyaw)
-    rot_mat = torch.tensor([[cos_theta, -sin_theta],
-                            [sin_theta, cos_theta]], device=device)
+    cos_theta = torch.cos(dyaw.clone().detach().to(device=device, dtype=dtype))
+    sin_theta = torch.sin(dyaw.clone().detach().to(device=device, dtype=dtype))
+    rot_mat = torch.stack([
+        torch.stack([cos_theta, -sin_theta]),
+        torch.stack([sin_theta, cos_theta])
+    ], dim=0)
+
     coords_rot = rot_mat @ coords.view(2, -1)  # (2, H*W)
 
     # 이동
-    coords_rot[0] += dx
-    coords_rot[1] += dy
+    coords_rot[0] += dx.clone().detach().to(device=device, dtype=dtype)
+    coords_rot[1] += dy.clone().detach().to(device=device, dtype=dtype)
 
     # canvas 좌표로 변환 (meter → pixel)
     coords_canvas = coords_rot / voxel_size
@@ -786,8 +813,9 @@ def warp_and_paste_into_large_bev(canvas, bev_feat, dx, dy, dyaw, voxel_size=0.5
 
     return canvas
 
+
 # 전체 large BEV 생성
-def get_large_bev(data_aug_conf, encoded_bev,vis_encoded_bev, positions,valid_mask, H_big=400, W_big=400, save_vis = False):
+def get_large_bev(data_aug_conf, encoded_bev,vis_encoded_bev, positions, H_big=400, W_big=400, save_vis = False):
     """
     encoded_bev shape : (agent_num, Batch, channel, small_H, small_W)
     position shape : (agent_num, Batch, 6) || 6 : [x,y,z,...]
@@ -805,8 +833,6 @@ def get_large_bev(data_aug_conf, encoded_bev,vis_encoded_bev, positions,valid_ma
     ego_pose = positions[0][0]
     
     for i in range(N):
-        if valid_mask[i][0] == 0:       ### dummy encoding result 예외 처리
-            continue
         each_agent_bev_feats = encoded_bev[i].squeeze(0)        ## each_agent_bev_feats shape :  (C, small_H, small_W)
         dx, dy, dyaw = get_relative_pose(ego_pose, positions[0][i])
         
@@ -1302,10 +1328,10 @@ class Mini_cooper(nn.Module):
     ############ ENCODER 최종 불러오는 곳
     ############################################################################################
     def encoding(self, images, intrins, extrins, positions, is_train=True):
-        encoded_bev, vis_encoded_bev, valid_mask = Encoding(images, intrins, extrins, self.data_aug_conf, self.grid_conf, is_train)
+        encoded_bev, vis_encoded_bev = Encoding(images, intrins, extrins, self.data_aug_conf, self.grid_conf, is_train)
         # print("ENCODED BEV SHAPE OF MULTI_AGENTS", encoded_bev.shape)     ## (max_padded_cavs(5), 1, 64, 200, 200)
         ##          64 channel Case (For Training)
-        mapped_bev= get_large_bev(self.data_aug_conf, encoded_bev,vis_encoded_bev, positions, valid_mask, save_vis = False)
+        mapped_bev= get_large_bev(self.data_aug_conf, encoded_bev,vis_encoded_bev, positions, save_vis = False)
 
         assert torch.isfinite(mapped_bev).all(), "[NaN] mapped_bev after encoding!"
         # print("LARGE BEV:::: ", mapped_bev, mapped_bev.shape)     ##  torch.Size([1, 64, 400, 400]) [B, Channel, H, W]
