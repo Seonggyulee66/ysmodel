@@ -1,9 +1,22 @@
 import torch
 import torch.nn as nn
 import cv2
-
+import numpy as np
 from einops import rearrange
+import torch.nn.functional as F
 
+class FocalLoss(nn.Module):
+    def __init__(self, gamma=2.0, weight=None):
+        super().__init__()
+        self.gamma = gamma
+        self.ce = nn.CrossEntropyLoss(weight=weight)
+
+    def forward(self, input, target):
+        logp = F.log_softmax(input, dim=1)
+        ce_loss = F.nll_loss(logp, target, reduction='none', weight=self.ce.weight)
+        p = torch.exp(-ce_loss)
+        focal_loss = ((1 - p) ** self.gamma) * ce_loss
+        return focal_loss.mean()
 
 class VanillaSegLoss(nn.Module):
     def __init__(self, args):
@@ -21,12 +34,11 @@ class VanillaSegLoss(nn.Module):
         self.target = args['target']
 
         self.loss_func_static = \
-            nn.CrossEntropyLoss(
+            FocalLoss(gamma=2.0,
                 weight=torch.Tensor([1., self.s_weights, self.l_weights]).cuda())       ## [Class 0 weight : 1, Class 1 : self.s_weights, Class 2 : self.l_weights]
         self.loss_func_dynamic = \
-            nn.CrossEntropyLoss(
-                weight=torch.Tensor([1., self.d_weights]).cuda())
-
+            FocalLoss(gamma=2.0,weight=torch.Tensor([1.,self.d_weights]).cuda())
+      
         self.loss_dict = {}
 
     def forward(self, output_dict, gt_dict):
@@ -58,8 +70,19 @@ class VanillaSegLoss(nn.Module):
         static_gt = rearrange(static_gt, 'b l h w -> (b l) h w')
         dynamic_gt = rearrange(dynamic_gt, 'b l h w -> (b l) h w')
 
+        dynamic_gt = dynamic_gt.long()
+        static_gt = static_gt.long()
+        
         if self.target == 'dynamic':
             dynamic_pred = rearrange(dynamic_pred, 'b l c h w -> (b l) c h w')
+            
+            pred_dynamic_class = dynamic_pred.argmax(dim=1)
+            unique_classes = torch.unique(pred_dynamic_class)
+            print(f"Dynamic prediction unique class : {unique_classes.tolist()}")
+            print(f"Dynamic GT unique classes: {torch.unique(dynamic_gt).tolist()}")
+            vehicle_ratio = (dynamic_gt == 1).float().mean()
+            print(f"GT Foreground(vehicle) pixel 비율: {vehicle_ratio.item():.5f}")
+
             dynamic_loss = self.loss_func_dynamic(dynamic_pred, dynamic_gt)
 
         elif self.target == 'static':
@@ -77,8 +100,6 @@ class VanillaSegLoss(nn.Module):
             dynamic_pred = rearrange(dynamic_pred, 'b l c h w -> (b l) c h w')
             static_pred = rearrange(static_pred, 'b l c h w -> (b l) c h w')
 
-            dynamic_gt = dynamic_gt.long()
-            static_gt = static_gt.long()
             
             # print("Before loss_func_dynamic")
             dynamic_loss = self.loss_func_dynamic(dynamic_pred, dynamic_gt)
@@ -90,8 +111,10 @@ class VanillaSegLoss(nn.Module):
 
         offset_loss = 0
         pos_loss = output_dict['pos_loss'][0]
+        offsets = output_dict['offsets']  # shape: (B, T, C, H, W)
         for offsets in output_dict['offsets'][0]:
             offset_loss += offsets.abs().mean()
+
         
         total_loss = self.s_coe * static_loss + self.d_coe * dynamic_loss + self.p_coe * pos_loss + self.o_coe* offset_loss
         self.loss_dict.update({'total_loss': total_loss,

@@ -25,10 +25,26 @@ class CamIntermediateFusionDataset_per_scenario(base_camera_dataset.BaseCameraDa
         
     def build_chunk_index(self):
         chunk_index_list = []
+        scenario_ids = self.params['train_params'].get('debug_scenario_ids', None)
+        tick_range = self.params['train_params'].get('debug_tick_range', None)
+        max_tick = self.params['train_params'].get('max_tick_per_scenario', None)
 
         for scenario_id in self.scenario_idx_list:
+            # ✅ 시나리오 필터링
+            if scenario_ids and scenario_id not in scenario_ids:
+                continue
+
+            # ✅ tick 리스트 받아오기
             timestamps = self.get_tick_indices_for_scenario(scenario_id)
 
+            # ✅ tick 범위 슬라이싱
+            if tick_range:
+                start_tick, end_tick = tick_range
+                timestamps = timestamps[start_tick:end_tick]
+            elif max_tick:
+                timestamps = timestamps[:max_tick]
+
+            # ✅ chunk 단위로 나누기
             for i in range(0, len(timestamps), self.chunk_size):
                 chunk_index_list.append({
                     'scenario_id': scenario_id,
@@ -37,11 +53,15 @@ class CamIntermediateFusionDataset_per_scenario(base_camera_dataset.BaseCameraDa
                 })
 
         return chunk_index_list
+
+
         
     def __getitem__(self, idx):
         chunk_info = self.chunk_index_list[idx]
         scenario_id = chunk_info['scenario_id']
         tick_range = range(chunk_info['start_tick'], chunk_info['end_tick'])
+        
+        print(f"[Debug] Scenario ID: {scenario_id} | Ticks: {list(tick_range)}")
         
         scenario_data = []
         for tick_idx in tick_range:

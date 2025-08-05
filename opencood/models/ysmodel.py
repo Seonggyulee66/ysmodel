@@ -875,122 +875,122 @@ class PatchEmbed(nn.Module):
 #                                       Decoder Version 1 - Simple UpBlock1
 ################################################################################################################################
 
-class UpBlock(nn.Module):
-    def __init__(self, in_ch, out_ch, norm_groups=4):
-        super().__init__()
-        self.conv = nn.Conv2d(in_ch, out_ch, kernel_size=3, padding=1)
-        self.norm = nn.GroupNorm(norm_groups, out_ch)
-        self.act = nn.LeakyReLU(negative_slope=0.1, inplace=True)
-
-    def forward(self, x, out_size):
-        x = F.interpolate(x, size=out_size, mode='bilinear', align_corners=False)
-        x = self.conv(x)
-        x = self.norm(x)
-        return self.act(x)
-
-class PatchDecoder(nn.Module):
-    def __init__(self, emb_dim, out_dim=64):
-        super().__init__()
-        # 입력 채널 줄이기: 64 -> 32
-        self.initial_conv = nn.Sequential(
-            nn.Conv2d(emb_dim, 32, kernel_size=3, padding=1),
-            nn.GroupNorm(4, 32),
-            nn.LeakyReLU(0.1, inplace=True)
-        )
-
-        self.up1 = UpBlock(32, 24)     # 64x64
-        self.up2 = UpBlock(24, 16)     # 128x128
-        self.up3 = UpBlock(16, 12)     # 256x256
-        self.up4 = UpBlock(12, out_dim)  # 512x512
-
-    def forward(self, x):
-        B, N, C = x.shape
-        H = W = int(N ** 0.5)
-        assert H * W == N, "Input must be square number of patches"
-
-        x = x.transpose(1, 2).reshape(B, C, H, W)
-        x = self.initial_conv(x)
-        x = self.up1(x, (64, 64))
-        x = self.up2(x, (128, 128))
-        x = self.up3(x, (256, 256))
-        x = self.up4(x, (512, 512))
-        return x
-
-################################################################################################################################
-#                                       Decoder Version 2 - U-net
-# ################################################################################################################################
-# class ConvBlock(nn.Module):
-#     def __init__(self, in_channels, out_channels):
+# class UpBlock(nn.Module):
+#     def __init__(self, in_ch, out_ch, norm_groups=4):
 #         super().__init__()
-#         self.block = nn.Sequential(
-#             nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1),
-#             nn.GroupNorm(4, out_channels, eps=1e-5),   # 🔑 std=0 방지 eps
-#             nn.ReLU(inplace=True),
-#             nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1),
-#             nn.GroupNorm(4, out_channels, eps=1e-5),   # 🔑
-#             nn.ReLU(inplace=True)
-#         )
-        
+#         self.conv = nn.Conv2d(in_ch, out_ch, kernel_size=3, padding=1)
+#         self.norm = nn.GroupNorm(norm_groups, out_ch)
+#         self.act = nn.LeakyReLU(negative_slope=0.1, inplace=True)
 
-#     def forward(self, x):
-#         return self.block(x)
+#     def forward(self, x, out_size):
+#         x = F.interpolate(x, size=out_size, mode='bilinear', align_corners=False)
+#         x = self.conv(x)
+#         x = self.norm(x)
+#         return self.act(x)
 
 # class PatchDecoder(nn.Module):
-#     def __init__(self, emb_dim=64):
+#     def __init__(self, emb_dim, out_dim=64):
 #         super().__init__()
-#         self.input_proj = nn.Conv2d(emb_dim, emb_dim, kernel_size=3, padding=1)
-        
-#         # Encoder
-#         self.enc1 = ConvBlock(emb_dim, 128)
-#         self.down1 = nn.Conv2d(128, 128, kernel_size=3, stride=2, padding=1)
+#         # 입력 채널 줄이기: 64 -> 32
+#         self.initial_conv = nn.Sequential(
+#             nn.Conv2d(emb_dim, 32, kernel_size=3, padding=1),
+#             nn.GroupNorm(4, 32),
+#             nn.LeakyReLU(0.1, inplace=True)
+#         )
 
-#         self.enc2 = ConvBlock(128, 256)
-#         self.down2 = nn.Conv2d(256, 256, kernel_size=3, stride=2, padding=1)
-
-#         self.enc3 = ConvBlock(256, 512)
-
-#         # Decoder
-#         self.up2 = nn.ConvTranspose2d(512, 256, kernel_size=2, stride=2)
-#         self.dec2 = ConvBlock(512, 256)
-
-#         self.up1 = nn.ConvTranspose2d(256, 128, kernel_size=2, stride=2)
-#         self.dec1 = ConvBlock(256, 128)
-
-#         self.up0 = nn.ConvTranspose2d(128, 64, kernel_size=2, stride=2)
-#         self.final_conv = nn.Conv2d(64, emb_dim, kernel_size=3, padding=1)
-#         self.out_relu = nn.ReLU()
+#         self.up1 = UpBlock(32, 24)     # 64x64
+#         self.up2 = UpBlock(24, 16)     # 128x128
+#         self.up3 = UpBlock(16, 12)     # 256x256
+#         self.up4 = UpBlock(12, out_dim)  # 512x512
 
 #     def forward(self, x):
 #         B, N, C = x.shape
 #         H = W = int(N ** 0.5)
-#         assert H * W == N, "N must be a perfect square"
+#         assert H * W == N, "Input must be square number of patches"
 
-#         x = x.transpose(1, 2).reshape(B, C, H, W)  # [B, 64, 25, 25]
-#         x = self.input_proj(x)                    # [B, 64, 25, 25]
+#         x = x.transpose(1, 2).reshape(B, C, H, W)
+#         x = self.initial_conv(x)
+#         x = self.up1(x, (64, 64))
+#         x = self.up2(x, (128, 128))
+#         x = self.up3(x, (256, 256))
+#         x = self.up4(x, (512, 512))
+#         return x
 
-#         x1 = self.enc1(x)                         # [B, 128, 25, 25]
-#         x1_down = self.down1(x1)                  # [B, 128, 13, 13]
-
-#         x2 = self.enc2(x1_down)                   # [B, 256, 13, 13]
-#         x2_down = self.down2(x2)                  # [B, 256, 7, 7]
-
-#         x3 = self.enc3(x2_down)                   # [B, 512, 7, 7]
-
-#         d2 = self.up2(x3)                         # [B, 256, 14, 14]
-#         x2 = F.interpolate(x2, size=d2.shape[-2:], mode='bilinear', align_corners=False)
-#         d2 = self.dec2(torch.cat([d2, x2], dim=1))  # [B, 256, 14, 14]
-
-#         d1 = self.up1(d2)                         # [B, 128, 28, 28]
-#         x1 = F.interpolate(x1, size=d1.shape[-2:], mode='bilinear', align_corners=False)
-#         d1 = self.dec1(torch.cat([d1, x1], dim=1))  # [B, 128, 28, 28]
-
-#         d0 = self.up0(d1)                         # [B, 64, 56, 56]
-
-#         out = F.interpolate(d0, size=(512, 512), mode='bilinear', align_corners=False)
-#         out = self.final_conv(out)               # [B, 64, 512, 512]
-#         out = self.out_relu(out)
+################################################################################################################################
+#                                       Decoder Version 2 - U-net
+# ################################################################################################################################
+class ConvBlock(nn.Module):
+    def __init__(self, in_channels, out_channels):
+        super().__init__()
+        self.block = nn.Sequential(
+            nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1),
+            nn.GroupNorm(4, out_channels, eps=1e-5),   # 🔑 std=0 방지 eps
+            nn.ReLU(inplace=True),
+            nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1),
+            nn.GroupNorm(4, out_channels, eps=1e-5),   # 🔑
+            nn.ReLU(inplace=True)
+        )
         
-#         return out
+
+    def forward(self, x):
+        return self.block(x)
+
+class PatchDecoder(nn.Module):
+    def __init__(self, emb_dim=64):
+        super().__init__()
+        self.input_proj = nn.Conv2d(emb_dim, emb_dim, kernel_size=3, padding=1)
+        
+        # Encoder
+        self.enc1 = ConvBlock(emb_dim, 128)
+        self.down1 = nn.Conv2d(128, 128, kernel_size=3, stride=2, padding=1)
+
+        self.enc2 = ConvBlock(128, 256)
+        self.down2 = nn.Conv2d(256, 256, kernel_size=3, stride=2, padding=1)
+
+        self.enc3 = ConvBlock(256, 512)
+
+        # Decoder
+        self.up2 = nn.ConvTranspose2d(512, 256, kernel_size=2, stride=2)
+        self.dec2 = ConvBlock(512, 256)
+
+        self.up1 = nn.ConvTranspose2d(256, 128, kernel_size=2, stride=2)
+        self.dec1 = ConvBlock(256, 128)
+
+        self.up0 = nn.ConvTranspose2d(128, 64, kernel_size=2, stride=2)
+        self.final_conv = nn.Conv2d(64, emb_dim, kernel_size=3, padding=1)
+        self.out_relu = nn.ReLU()
+
+    def forward(self, x):
+        B, N, C = x.shape
+        H = W = int(N ** 0.5)
+        assert H * W == N, "N must be a perfect square"
+
+        x = x.transpose(1, 2).reshape(B, C, H, W)  # [B, 64, 25, 25]
+        x = self.input_proj(x)                    # [B, 64, 25, 25]
+
+        x1 = self.enc1(x)                         # [B, 128, 25, 25]
+        x1_down = self.down1(x1)                  # [B, 128, 13, 13]
+
+        x2 = self.enc2(x1_down)                   # [B, 256, 13, 13]
+        x2_down = self.down2(x2)                  # [B, 256, 7, 7]
+
+        x3 = self.enc3(x2_down)                   # [B, 512, 7, 7]
+
+        d2 = self.up2(x3)                         # [B, 256, 14, 14]
+        x2 = F.interpolate(x2, size=d2.shape[-2:], mode='bilinear', align_corners=False)
+        d2 = self.dec2(torch.cat([d2, x2], dim=1))  # [B, 256, 14, 14]
+
+        d1 = self.up1(d2)                         # [B, 128, 28, 28]
+        x1 = F.interpolate(x1, size=d1.shape[-2:], mode='bilinear', align_corners=False)
+        d1 = self.dec1(torch.cat([d1, x1], dim=1))  # [B, 128, 28, 28]
+
+        d0 = self.up0(d1)                         # [B, 64, 56, 56]
+
+        out = F.interpolate(d0, size=(512, 512), mode='bilinear', align_corners=False)
+        out = self.final_conv(out)               # [B, 64, 512, 512]
+        out = self.out_relu(out)
+        
+        return out
 
 
 ################################################################################################################################
@@ -1395,7 +1395,7 @@ class Mini_cooper(nn.Module):
 
         # print(f'Head Output shape : {head_output["dynamic_seg"].shape}')
         
-        dummy_pos_loss = torch.randn(1).to('cuda')
+        dummy_pos_loss = torch.tensor(0.0).to('cuda')
         final_dict = self.add_item_to_dict(seg_loss_dict,'offsets', offsets_list)
         final_dict = self.add_item_to_dict(final_dict,'pos_loss', dummy_pos_loss)
         

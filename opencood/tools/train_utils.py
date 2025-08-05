@@ -212,7 +212,6 @@ def setup_lr_schedular(hypes, optimizer, n_iter_per_epoch):
     n_iter_per_epoch : int
         Iterations per epoech.
     """
-    accumulation_step = 5
     lr_schedule_config = hypes['lr_scheduler']
 
     if lr_schedule_config['core_method'] == 'step':
@@ -240,8 +239,8 @@ def setup_lr_schedular(hypes, optimizer, n_iter_per_epoch):
     elif lr_schedule_config['core_method'] == 'cosineannealwarm':
         print('cosine annealing is chosen for lr scheduler')
 
-        num_steps = lr_schedule_config['epoches'] * n_iter_per_epoch / accumulation_step
-        warmup_lr = lr_schedule_config['warmup_lr'] / accumulation_step
+        num_steps = lr_schedule_config['epoches'] * n_iter_per_epoch 
+        warmup_lr = lr_schedule_config['warmup_lr'] 
         warmup_steps = lr_schedule_config['warmup_epoches'] * n_iter_per_epoch
         lr_min = lr_schedule_config['lr_min']
 

@@ -88,7 +88,6 @@ class BaseDataset(Dataset):
             self.backbone_delay = 0  # ms
 
         self.label_generation_mode = params['label_generation']
-        self.max_padding_cavs = params['max_padding_cavs']
         self.chunk_size = params['chunk_size']
         
         if self.train and not self.validate:

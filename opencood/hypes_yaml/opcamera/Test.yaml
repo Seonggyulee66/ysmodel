@@ -7,6 +7,8 @@ train_params:
   epoches: &epoches 100
   eval_freq: 10
   save_freq: 10
+  debug_scenario_ids: [0, 1, 2, 3, 4]
+  debug_tick_range: [0, 20]
   max_cav: &max_cav 7
   visible: False
 
@@ -17,7 +19,7 @@ fusion:
 data_augment: []
 add_data_extension: ['bev_dynamic.png', 'bev_static.png', 'bev_lane.png', 'bev_visibility.png', 'bev_visibility_corp.png','merged_bev_dynamic.png','merged_bev_static.png','merged_bev_lane.png']
 label_generation : false ## true or false
-chunk_size : 10
+chunk_size : 5
 
 # preprocess-related
 preprocess:
@@ -44,7 +46,7 @@ postprocess:
 model:
   core_method: ysmodel
   args:
-    target: &target 'both' # dynamic, static or both
+    target: &target 'dynamic' # dynamic, static or both
     max_cav: *max_cav
     encoder:
       xbound : [-50.0, 50.0, 0.5]
@@ -84,18 +86,18 @@ loss:
   args:
     target: *target
     d_weights: 75.0
-    s_weights: 15.0
-    d_coe: 2.0
-    s_coe: 2.0
+    s_weights: 30.0
+    d_coe: 1.0
+    s_coe: 1.0
     p_coe : 0.0
-    o_coe : 0.02
+    o_coe : 0.2
 
 optimizer:
   core_method: AdamW
   lr: 2e-4
   args:
     eps: 1e-8
-    weight_decay: 1e-2
+    weight_decay: 5e-4
 
 lr_scheduler:
   core_method: cosineannealwarm
@@ -103,3 +105,8 @@ lr_scheduler:
   warmup_epoches: 5
   warmup_lr: 5e-5
   lr_min: 1e-6
+
+# lr_scheduler:
+#   core_method: step
+#   step_size: 10
+#   gamma: 0.5

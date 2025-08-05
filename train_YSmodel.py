@@ -204,6 +204,8 @@ def main():
         if opt.rank == 0:
             pbar2 = tqdm.tqdm(total=len(train_loader), leave=True)
         
+        accum_loss = 0.0
+        
         for i,scenario_batch in enumerate(train_loader):
             scenario_id_check = scenario_batch['ego']['scenario_id'][0]
              
@@ -211,9 +213,11 @@ def main():
             model.train()
             
             prev_encoding_result = None
-            accumulation_steps = 5
+            
+            accumulation_steps = 2
             
             record_len = scenario_batch['ego']['record_len']
+            
             for tick_idx in range(record_len):
                 ## For checking the timestamp value
                 # ts_value = scenario_batch['ego']['timestamp_key'][tick_idx].squeeze().tolist()
@@ -306,27 +310,28 @@ def main():
                         # print("GT static shape:", gt_tick['gt_static'].shape)
                         # print("Static output min/max:", model_output_dict['static_seg'].min(), model_output_dict['static_seg'].max())
                         
-                        final_loss = criterion(model_output_dict, gt_tick)
-                        final_loss = final_loss/accumulation_steps
+                        final_loss = criterion(model_output_dict, gt_tick) / accumulation_steps
+                        accum_loss += final_loss
                         # print(f"Total Loss : {final_loss}")
-
-                prev_encoding_result = current_encoding_result.detach()
-                    
-                if not opt.half:
-                    final_loss.backward()
-                    optimizer.step()
-                    optimizer.zero_grad()
-                    scheduler.step()
-                else:
-                    scaler.scale(final_loss).backward()
-                    if (tick_idx +1) % accumulation_steps ==0:
+                        
+                with torch.no_grad():
+                    prev_encoding_result = current_encoding_result.detach()
+                
+                if (tick_idx + 1) % accumulation_steps == 0 or (tick_idx + 1) == record_len :
+                    if not opt.half:
+                        accum_loss.backward()
+                        optimizer.step()
+                        scheduler.update()
+                    else:
+                        scaler.scale(accum_loss).backward()
                         scaler.step(optimizer)
                         scaler.update()
-                        optimizer.zero_grad()
-                        scheduler.step(epoch)
-
+                        
+                    optimizer.zero_grad()
+                    scheduler.step(epoch)
+                    accum_loss = 0.0
+                    
                 # print('--------------------------------------------------')
-
             
             if opt.rank == 0:
                 criterion.logging(epoch, i, scenario_id_check, len(train_loader), writer, pbar=pbar2,rank = opt.rank)
@@ -343,133 +348,135 @@ def main():
         DistributedSampler가 아닌 SequentialSampler를 사용해야함
         현재는 속도가 느린 관계로 Distributed에 일부만 save하는 것으로함 
         """
-        if epoch != 0 and epoch % hypes['train_params']['eval_freq'] == 0: 
+        # if epoch % hypes['train_params']['eval_freq'] == 0: 
             
-            valid_ave_loss = []
-            static_ave_iou = []
-            dynamic_ave_iou = []
-            
-            for i, scenario_batch in enumerate(val_loader):
-                scenario_id_check = scenario_batch['ego']['scenario_id'][0]
-                model.eval()
+        #     valid_ave_loss = []
+        #     static_ave_iou = []
+        #     dynamic_ave_iou = []
+        #     print('-'*100)
+        #     print('                 Evaluation Progressing')
+        #     print('-'*100)
+        #     for i, scenario_batch in enumerate(val_loader):
+        #         scenario_id_check = scenario_batch['ego']['scenario_id'][0]
+        #         model.eval()
 
-                prev_encoding_result = None
-                record_len = scenario_batch['ego']['record_len']
+        #         prev_encoding_result = None
+        #         record_len = scenario_batch['ego']['record_len']
                 
-                for tick_idx in range(record_len):
-                    with torch.no_grad():
-                        with torch.cuda.amp.autocast():
-                            # print(f"## Validation ## Scenario id : {scenario_id_check} || i : {i} || tick_idx : {tick_idx} // {record_len} || timestamp_key : {scenario_batch['ego']['timestamp_key'][tick_idx].squeeze().tolist()[0]}")
-                            tick_input_images = scenario_batch['ego']['inputs'][tick_idx].to(device)        ## [num_agents, num_cams, H, H, C]
-                            tick_input_intrins = scenario_batch['ego']['intrinsic'][tick_idx].to(device)    ## [num_agents, num_cams, 3, 3]
-                            tick_input_extrins = scenario_batch['ego']['extrinsic'][tick_idx].to(device)    ## [num_agents, num_cams, 4, 4]
-                            tick_input_locs = scenario_batch['ego']['agent_true_loc'][tick_idx].to(device)  ## [num_agents, 6]
+        #         for tick_idx in range(record_len):
+        #             with torch.no_grad():
+        #                 with torch.cuda.amp.autocast():
+        #                     # print(f"## Validation ## Scenario id : {scenario_id_check} || i : {i} || tick_idx : {tick_idx} // {record_len} || timestamp_key : {scenario_batch['ego']['timestamp_key'][tick_idx].squeeze().tolist()[0]}")
+        #                     tick_input_images = scenario_batch['ego']['inputs'][tick_idx].to(device)        ## [num_agents, num_cams, H, H, C]
+        #                     tick_input_intrins = scenario_batch['ego']['intrinsic'][tick_idx].to(device)    ## [num_agents, num_cams, 3, 3]
+        #                     tick_input_extrins = scenario_batch['ego']['extrinsic'][tick_idx].to(device)    ## [num_agents, num_cams, 4, 4]
+        #                     tick_input_locs = scenario_batch['ego']['agent_true_loc'][tick_idx].to(device)  ## [num_agents, 6]
                             
-                            # Batch는 1 고정이므로 Encoding shape에 맞게 unsqueeze
-                            tick_input_images = tick_input_images.unsqueeze(1)          ## [num_agents, 1, num_cams, H, H, C]
-                            tick_input_intrins = tick_input_intrins.unsqueeze(1)        ## [num_agents, 1, num_cams, 3, 3]
-                            tick_input_extrins = tick_input_extrins.unsqueeze(1)        ## [num_agents, 1, num_cams, 4, 4]
-                            tick_input_locs = tick_input_locs.unsqueeze(1)              ## [num_agents, 1, 6]
+        #                     # Batch는 1 고정이므로 Encoding shape에 맞게 unsqueeze
+        #                     tick_input_images = tick_input_images.unsqueeze(1)          ## [num_agents, 1, num_cams, H, H, C]
+        #                     tick_input_intrins = tick_input_intrins.unsqueeze(1)        ## [num_agents, 1, num_cams, 3, 3]
+        #                     tick_input_extrins = tick_input_extrins.unsqueeze(1)        ## [num_agents, 1, num_cams, 4, 4]
+        #                     tick_input_locs = tick_input_locs.unsqueeze(1)              ## [num_agents, 1, 6]
                             
-                            current_encoding_result = model.module.encoding(
-                            tick_input_images,
-                            tick_input_intrins,
-                            tick_input_extrins,
-                            tick_input_locs,
-                            is_train=False
-                            )
+        #                     current_encoding_result = model.module.encoding(
+        #                     tick_input_images,
+        #                     tick_input_intrins,
+        #                     tick_input_extrins,
+        #                     tick_input_locs,
+        #                     is_train=False
+        #                     )
 
-                            if prev_encoding_result is None:
-                                model_output_dict = model.module.forward(
-                                    current_encoding_result,
-                                    current_encoding_result,
-                                    bool_prev_pos_encoded=False
-                                )
-                            else:
-                                model_output_dict = model.module.forward(
-                                    current_encoding_result,
-                                    prev_encoding_result,
-                                    bool_prev_pos_encoded=True
-                                )
+        #                     if prev_encoding_result is None:
+        #                         model_output_dict = model.module.forward(
+        #                             current_encoding_result,
+        #                             current_encoding_result,
+        #                             bool_prev_pos_encoded=False
+        #                         )
+        #                     else:
+        #                         model_output_dict = model.module.forward(
+        #                             current_encoding_result,
+        #                             prev_encoding_result,
+        #                             bool_prev_pos_encoded=True
+        #                         )
                             
-                            gt_tick = {
-                                    'inputs': (scenario_batch['ego']['inputs'][tick_idx]).unsqueeze(1).to(device),
-                                    'extrinsic': (scenario_batch['ego']['extrinsic'][tick_idx]).unsqueeze(1).to(device),
-                                    'intrinsic': (scenario_batch['ego']['intrinsic'][tick_idx]).unsqueeze(1).to(device),
-                                    'gt_static': torch.from_numpy(scenario_batch['ego']['gt_static'][tick_idx]).unsqueeze(1).to(device),
-                                    'gt_dynamic': torch.from_numpy(scenario_batch['ego']['gt_dynamic'][tick_idx]).unsqueeze(1).to(device),
-                                    'transformation_matrix': torch.from_numpy(scenario_batch['ego']['transformation_matrix'][tick_idx]).unsqueeze(1).to(device),
-                                    'pairwise_t_matrix': torch.from_numpy(scenario_batch['ego']['pairwise_t_matrix'][tick_idx]).unsqueeze(1).to(device),
-                                    # 'record_len': scenario_batch['ego']['record_len'][tick_idx].unsqueeze(1).to(device),
-                                    'scenario_id': scenario_batch['ego']['scenario_id'][tick_idx],
-                                    'agent_true_loc' : (scenario_batch['ego']['agent_true_loc'][tick_idx]).unsqueeze(1).to(device),
-                                    'cav_list' : (scenario_batch['ego']['cav_list'][tick_idx]),
-                                    # 'dist_to_ego' : distance_all_batch,
-                                    'single_bev' : torch.from_numpy(scenario_batch['ego']['single_bev'][tick_idx]).unsqueeze(1).to(device),
-                                    'timestamp_key' : torch.from_numpy(scenario_batch['ego']['timestamp_key'][tick_idx]).unsqueeze(1).to(device)
-                            }
+        #                     gt_tick = {
+        #                             'inputs': (scenario_batch['ego']['inputs'][tick_idx]).unsqueeze(1).to(device),
+        #                             'extrinsic': (scenario_batch['ego']['extrinsic'][tick_idx]).unsqueeze(1).to(device),
+        #                             'intrinsic': (scenario_batch['ego']['intrinsic'][tick_idx]).unsqueeze(1).to(device),
+        #                             'gt_static': torch.from_numpy(scenario_batch['ego']['gt_static'][tick_idx]).unsqueeze(1).to(device),
+        #                             'gt_dynamic': torch.from_numpy(scenario_batch['ego']['gt_dynamic'][tick_idx]).unsqueeze(1).to(device),
+        #                             'transformation_matrix': torch.from_numpy(scenario_batch['ego']['transformation_matrix'][tick_idx]).unsqueeze(1).to(device),
+        #                             'pairwise_t_matrix': torch.from_numpy(scenario_batch['ego']['pairwise_t_matrix'][tick_idx]).unsqueeze(1).to(device),
+        #                             # 'record_len': scenario_batch['ego']['record_len'][tick_idx].unsqueeze(1).to(device),
+        #                             'scenario_id': scenario_batch['ego']['scenario_id'][tick_idx],
+        #                             'agent_true_loc' : (scenario_batch['ego']['agent_true_loc'][tick_idx]).unsqueeze(1).to(device),
+        #                             'cav_list' : (scenario_batch['ego']['cav_list'][tick_idx]),
+        #                             # 'dist_to_ego' : distance_all_batch,
+        #                             'single_bev' : torch.from_numpy(scenario_batch['ego']['single_bev'][tick_idx]).unsqueeze(1).to(device),
+        #                             'timestamp_key' : torch.from_numpy(scenario_batch['ego']['timestamp_key'][tick_idx]).unsqueeze(1).to(device)
+        #                     }
                             
-                            batch_dict = {
-                                            'ego': {
-                                                k: v.unsqueeze(0) if torch.is_tensor(v) and v.ndim >= 1 else v
-                                                for k, v in gt_tick.items()
-                                            }
-                                        }       ## torch.Size([1, 1, 1, 512, 512])
+        #                     batch_dict = {
+        #                                     'ego': {
+        #                                         k: v.unsqueeze(0) if torch.is_tensor(v) and v.ndim >= 1 else v
+        #                                         for k, v in gt_tick.items()
+        #                                     }
+        #                                 }       ## torch.Size([1, 1, 1, 512, 512])
                             
-                            ## model output static seg : torch.Size([1, 1, 3, 512, 512])
-                            ## model output dynamic seg : torch.Size([1, 1, 2, 512, 512])
+        #                     ## model output static seg : torch.Size([1, 1, 3, 512, 512])
+        #                     ## model output dynamic seg : torch.Size([1, 1, 2, 512, 512])
                             
-                            final_loss = criterion(model_output_dict, gt_tick)
-                            valid_ave_loss.append(final_loss.item())
+        #                     final_loss = criterion(model_output_dict, gt_tick)
+        #                     valid_ave_loss.append(final_loss.item())
                             
-                            model_output_dict = \
-                                opencood_val_dataset.post_process(gt_tick,
-                                                                    model_output_dict)      ## model output dict만 처리
+        #                     model_output_dict = \
+        #                         opencood_val_dataset.post_process(gt_tick,
+        #                                                             model_output_dict)      ## model output dict만 처리
                                 
                             
-                            ## GT input shape : torch.Size([1, 5, 1, 4, 512, 512, 3])       ## agent_nums = 5 ==> max agents pdding이 됨
-                            ## GT static map : gt_static shape : torch.Size([1, 1, 1, 512, 512])
-                            ## model_output_dict input shape (static_map) : torch.Size([1, 512, 512])
+        #                     ## GT input shape : torch.Size([1, 5, 1, 4, 512, 512, 3])       ## agent_nums = 5 ==> max agents pdding이 됨
+        #                     ## GT static map : gt_static shape : torch.Size([1, 1, 1, 512, 512])
+        #                     ## model_output_dict input shape (static_map) : torch.Size([1, 512, 512])
                             
-                            train_utils.save_bev_seg_binary(model_output_dict,              ## logs/ys_model_xxxxxx/train_vis
-                                                            batch_dict,
-                                                            saved_path,
-                                                            i,
-                                                            tick_idx,
-                                                            epoch)
-                            iou_cal = cal_iou_training(batch_dict,
-                                                            model_output_dict)
+        #                     train_utils.save_bev_seg_binary(model_output_dict,              ## logs/ys_model_xxxxxx/train_vis
+        #                                                     batch_dict,
+        #                                                     saved_path,
+        #                                                     i,
+        #                                                     tick_idx,
+        #                                                     epoch)
+        #                     iou_cal = cal_iou_training(batch_dict,
+        #                                                     model_output_dict)
 
-                            static_ave_iou.append(iou_cal[0])
-                            dynamic_ave_iou.append(iou_cal[1])
-                            # lane_ave_iou.append(iou_static[2])
+        #                     static_ave_iou.append(iou_cal[0])
+        #                     dynamic_ave_iou.append(iou_cal[1])
+        #                     # lane_ave_iou.append(iou_static[2])
                             
-                        prev_encoding_result = current_encoding_result.detach()
-                        torch.cuda.empty_cache()  # ✅ tick마다 GPU 캐시 정리
+        #                 prev_encoding_result = current_encoding_result.detach()
+        #                 torch.cuda.empty_cache()  # ✅ tick마다 GPU 캐시 정리
 
-            valid_ave_loss = statistics.mean(valid_ave_loss)
-            static_ave_iou = statistics.mean(static_ave_iou)
-            # lane_ave_iou = statistics.mean(lane_ave_iou)
-            dynamic_ave_iou = statistics.mean(dynamic_ave_iou)
+        #     valid_ave_loss = statistics.mean(valid_ave_loss)
+        #     static_ave_iou = statistics.mean(static_ave_iou)
+        #     # lane_ave_iou = statistics.mean(lane_ave_iou)
+        #     dynamic_ave_iou = statistics.mean(dynamic_ave_iou)
 
-            print('-'*100)
-            print('At epoch %d, the validation loss is %f,'
-                'the dynamic iou is %f, t'
-                % (epoch,
-                    valid_ave_loss,
-                    dynamic_ave_iou,
-                    ))
-            print('-'*100)
+        #     print('-'*100)
+        #     print('At epoch %d, the validation loss is %f,'
+        #         'the dynamic iou is %f, t'
+        #         % (epoch,
+        #             valid_ave_loss,
+        #             dynamic_ave_iou,
+        #             ))
+        #     print('-'*100)
 
-            writer.add_scalar('Validate_Loss', valid_ave_loss, epoch)
-            writer.add_scalar('Dynamic_Iou', dynamic_ave_iou, epoch)
-            writer.add_scalar('Road_IoU', static_ave_iou, epoch)
-                # writer.add_scalar('Lane_IoU', static_ave_iou, epoch)
+        #     writer.add_scalar('Validate_Loss', valid_ave_loss, epoch)
+        #     writer.add_scalar('Dynamic_Iou', dynamic_ave_iou, epoch)
+        #     writer.add_scalar('Road_IoU', static_ave_iou, epoch)
+        #         # writer.add_scalar('Lane_IoU', static_ave_iou, epoch)
 
-        if epoch % hypes['train_params']['save_freq'] == 0:
-            torch.save(model_without_ddp.state_dict(),
-                       os.path.join(saved_path,
-                                    'net_epoch%d.pth' % (epoch + 1)))
+        # if epoch % hypes['train_params']['save_freq'] == 0:
+        #     torch.save(model_without_ddp.state_dict(),
+        #                os.path.join(saved_path,
+        #                             'net_epoch%d.pth' % (epoch + 1)))
 
         # opencood_train_dataset.reinitialize()         ## cav 순서가 바뀌어 ego가 바뀌는 상황이 없으므로 reinitialize해줄 필요없음
 
