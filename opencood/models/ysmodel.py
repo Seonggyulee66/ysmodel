@@ -1064,141 +1064,134 @@ class ResidualConnection(nn.Module):
 
 class DeformableAttention1D(nn.Module):
     def __init__(
-      self,
-      dim,
-      dim_head = 64,
-      heads = 1,
-      dropout = 0.,
-      downsample_factor = 4,
-      offset_scale = None,
-      offset_groups = None,
-      offset_kernel_size = 6,
-      group_queries = True,
-      group_key_value = True,
-      device = None
+        self,
+        dim,
+        dim_head=64,
+        heads=8,
+        num_points=2,
+        dropout=0.,
+        device=None,
     ):
         super().__init__()
-        offset_scale = default(offset_scale,downsample_factor)  ## 앞에 param이 존재하면 앞에꺼 없으면 뒤에꺼
-        assert offset_kernel_size >= downsample_factor, 'offset kernel size must be greater than or equal to the downsample factor'
-        assert divisible_by(offset_kernel_size - downsample_factor, 2)
-
-        offset_groups = default(offset_groups, heads)   ## offset group은 여러개의 offest을 묶은 집합, 각 head가 다른 위치를 참조할 수 있도록 하나의 head에 할당된 offset들의 모음
-        assert divisible_by(heads, offset_groups)
-
-        inner_dim = dim_head * heads
-        # self.scale = dim_head ** -0.5
-        self.register_buffer("scale", torch.tensor(dim_head ** -0.5, dtype=torch.float32))
         self.heads = heads
-        self.offset_groups = offset_groups  
+        self.num_points = num_points
+        inner_dim = dim_head * heads
 
-        offset_dims = inner_dim // offset_groups
-        self.downsample_factor = downsample_factor
-
-        self.to_offsets = nn.Sequential(
-            nn.Conv1d(offset_dims,offset_dims,offset_kernel_size,groups=offset_dims,stride = downsample_factor, padding = (offset_kernel_size - downsample_factor) // 2,device=device),
-            nn.GroupNorm(1, offset_dims), 
-            nn.GELU(),
-            nn.Conv1d(offset_dims,1,1,bias=False,device=device),
-            Rearrange('b 1 n -> b n'),
-            nn.Tanh(),
-            Scale(offset_scale)
-        )
-
+        self.scale = dim_head ** -0.5
         self.dropout = nn.Dropout(dropout)
-        self.to_q = nn.Conv1d(2*dim, inner_dim, 1, groups=offset_groups if group_queries else 1, bias=False,device=device)
-        self.to_k = nn.Conv1d(dim, inner_dim, 1, groups=offset_groups if group_key_value else 1, bias = False,device=device)
-        self.to_v = nn.Conv1d(dim, inner_dim, 1, groups=offset_groups if group_key_value else 1, bias = False,device=device)
-        
-        self.to_out = nn.Conv1d(inner_dim,dim,1,device=device)
 
-    def forward(self, x, prev_x):
+        # LayerNorm
+        self.norm_q = nn.LayerNorm(dim * 2)
+        self.norm_k = nn.LayerNorm(dim)
+        self.norm_v = nn.LayerNorm(dim)
+
+
+        # Q, K, V projection
+        self.to_q = nn.Linear(dim * 2, inner_dim, bias=False, device=device)                    ## in_features (*,H_in), out_features (*,H_out) || nn.Linear(H_in, H_out)
+        self.to_k = nn.Linear(dim, inner_dim, bias=False)
+        self.to_v = nn.Linear(dim, inner_dim, bias=False)
+      
+
+        # Offset predictor: (B, H, N, P)
+        self.offset_predictor = nn.Conv1d(inner_dim, heads * num_points, 1, device=device)      ## in_features (batch, feature_dim, time_step) || nn.Conv1d(feature_dim, out_feature_dim)
+        self.offset_predictor.bias.data.uniform_(-1.0, 1.0)
+        self.attn_weight_predictor = nn.Conv1d(inner_dim, heads * num_points, 1, device=device)
+
+        self.to_out = nn.Sequential(
+            nn.Conv1d(inner_dim, dim, 1, device=device),
+            nn.Dropout(dropout)
+        )
+        
+        nn.init.xavier_uniform_(self.to_q.weight)
+        nn.init.xavier_uniform_(self.to_k.weight)
+        nn.init.xavier_uniform_(self.to_v.weight)
+
+    def forward(self, x, prev_x, use_learned_weights=False):
         """
-        x: (B, N, D)  torch.Size([1, 2500, 64])
-        prev_x: (B, N, D)
-        
-        Returns: out shape : torch.Size([1, 2500, 64]), offsets shape : torch.Size([16, 625]
-        F.grid_sample을 활용하여 입력 텐서의 특정 위치에서 값을 grid에서 정의한 (x,y) 좌표에 대응하는 값을 샘플링하는 기능을 구현합니다.
-        input은 원래 1D 이지만, (B2G, d_g, 1, L_in) 형태로 가짜 2D 좌표를 만듬
-        grid는 (B2G, L_out, 1, 2) (x,0)만 써서 x 위치에 따라 샘플링
-        결과는 (B2G, d_g, L_out, 1) 형태에서 squeeze 후 (B2G, d_g, L_out)로 변환됨
-        
+        x, prev_x: (B, N, D)
         """
-        x = rearrange(x, 'b n d -> b d n')              # (B, D, N)                 (1, 64, 2500) 
-        prev_x = rearrange(prev_x, 'b n d -> b d n')    # (B, D, N)                 (1, 64, 2500)
+        B, N, D = x.shape
+        H, P = self.heads, self.num_points
+        device = x.device
 
-        B, N, device = x.shape[0], x.shape[-1], x.device
-        heads, G = self.heads, self.offset_groups
+        # ===== Query =====
+        q_input = torch.cat([x, prev_x], dim=-1)  # (B, N, 2D)
+        q_input = self.norm_q(q_input)            # (B, N, 2D)
+        q = self.to_q(q_input).transpose(1, 2)  # (B, inner_dim, N)
 
-        # === Q ===
-        concatenated_query = torch.cat([prev_x, x], dim=1)   # (B, 2D, N)           (1, 128, 2500)
-        q = self.to_q(concatenated_query)                    # (B, inner_dim, N)    (1, 512, 2500)
+        # ===== Offset + Attention weights =====
+        # offset / attn weight 예측
+        offsets = self.offset_predictor(q)                                                      # (B, H*P, N)
+        offsets = rearrange(offsets, 'b (h p) n -> b h p n', h=self.heads, p=self.num_points)   # (B, H, P, N)
+
+        attn_weights = self.attn_weight_predictor(q)                                                        # (B, H*P, N)
+        attn_weights = rearrange(attn_weights, 'b (h p) n -> b h p n', h=self.heads, p=self.num_points)     # (B, H, P, N)
+        attn_weights = attn_weights.softmax(dim=2)                                                          # (B, H, P, N) || softmax를 통해 attention weight를 구함
+
+        # ===== KV =====
+        kv_input = torch.cat([x, prev_x], dim=0)                # (2B, N, D)
+        kv_input_k = self.norm_k(kv_input)                       # (2B, N, D)
+        kv_input_v = self.norm_v(kv_input)                       # (2B, N, D)
+        k = self.to_k(kv_input_k)
+        v = self.to_v(kv_input_v)
+        # k, v = kv.chunk(2, dim=-1)                              # (2B, N, inner_dim) 
         
-        group = lambda t: rearrange(t, 'b (g d) n -> (b g) d n', g=G)
-        grouped_queries = group(q)                           # (B*G, d_g, N)        (8, 64, 2500)
+        k = k.view(2, B, N, H, -1).permute(1, 3, 4, 0, 2).reshape(B, H, -1, 2 * N)  # (2B,N,inner_dim) -> (2,B,N,H,Dim_head) -> (B,H,Dim_head,2,N) -> (B,H,Dim_head,2N)
+        v = v.view(2, B, N, H, -1).permute(1, 3, 4, 0, 2).reshape(B, H, -1, 2 * N)  # (2B,N,inner_dim) -> (2,B,N,H,Dim_head) -> (B,H,Dim_head,2,N) -> (B,H,Dim_head,2N)
 
-        offsets = self.to_offsets(grouped_queries)           # (B*G, L_out)         (8, 625)
+        # ===== Sampling position =====
+        pos = torch.arange(N, device=device).view(1, 1, 1, N).expand(B, H, P, -1)  # (N,) -> (1,1,1,N) -> (B,H,P,N)
+        sample_pos = pos + offsets  # (B, H, P, N)
+        sample_pos = sample_pos.clamp(0, 2 * N - 1)
 
-        # === KV ===
-        kv_input = torch.cat([prev_x, x], dim=0)             # (2B, D, N)           (2, 64, 2500)
-        grouped_kv_input = group(kv_input)                   # (2B*G, d_g, N)       (16, 8, 2500)
+        # ===== Gather function =====
+        def gather_feat(feat, pos):
+            """
+            feat: (B, H, D, L)
+            pos:  (B, H, P, Nq)
+            Returns:
+                out: (B, H, D, Nq, P)
+            """
+            B, H, D, L = feat.shape
+            _, _, P, Nq = pos.shape
 
-        # === offsets repeat ===
-        offsets = offsets.repeat(2, 1)                       # (2B*G, L_out)        (16,625)
+            pos = pos.permute(0, 1, 3, 2).contiguous().long()  # (B, H, Nq, P)
+            feat = feat.permute(0, 1, 3, 2).contiguous()       # (B, H, L, D)
 
-        # === grid ===
-        L_in = grouped_kv_input.shape[-1]   # L_in = 2500
-        L_out = offsets.shape[-1]           # L_out = 625
-        B2G = grouped_kv_input.shape[0]     # B2G = 16 
+            # flatten B and H to simplify gather
+            feat = feat.view(B * H, L, D)                      # (B*H, L, D)
+            pos = pos.view(B * H, Nq, P)                       # (B*H, Nq, P)
 
-        pos = torch.linspace(0, L_in - 1, steps=L_out, device=device).unsqueeze(0).expand(B2G, -1)  # (16, 625)
-        vgrid = pos + offsets                                                                       # (16, 625)
-        vgrid_scaled = 2.0 * (vgrid / max(L_in - 1, 1)) - 1.0                                       # (16, 625)  # [-1, 1] 범위로 정규화
+            index = pos.unsqueeze(-1).expand(-1, -1, -1, D)     # (B*H, Nq, P, D)
+            feat = feat.unsqueeze(1).expand(-1, Nq, -1, -1)     # (B*H, Nq, L, D)
 
-        vgrid_scaled = vgrid_scaled.unsqueeze(-1)                                                   #  (B2G, L_out, 1)  grid sampling의 x 값(16, 625, 1)
-        dummy_y = torch.zeros_like(vgrid_scaled)                                                    # (B2G, L_out, 1)   grid smapling의 y 값, 여기서는 0  (16, 625, 1)                 
+            gathered = torch.gather(feat, 2, index)            # (B*H, Nq, P, D)
+            gathered = gathered.permute(0, 3, 1, 2).contiguous().view(B, H, D, Nq, P)
+
+            return gathered  # (B, H, D, Nq, P)
+
+        k_sampled = gather_feat(k, sample_pos)  # (B, H, D, N, P) || pos에 따라 key/value를 샘플링
+        v_sampled = gather_feat(v, sample_pos)  # (B, H, D, N, P)
+
+        # ===== Attention =====
+        q = q.view(B, H, -1, N).transpose(2, 3) * self.scale  # (B, H, N, Dh)
+
+        # Deformable DETR에서는 attn_weight만 softmax로 쓰기도 함
+        if use_learned_weights:
+            attn = attn_weights.permute(0, 1, 3, 2).unsqueeze(-1)  # (B, H, N, P, 1)
+        else:
+            sim = (q.unsqueeze(-1) * k_sampled.permute(0, 1, 3, 2, 4)).sum(-2)
+            attn = sim.softmax(dim=-1).unsqueeze(-1)  # (B, H, N, P, 1)
+        # v = v_sampled.permute(0, 1, 3, 4, 2)                  # (B, H, N, P, D)
+        # out = (attn * v).sum(dim=3)
         
-        grouped_kv_input = grouped_kv_input.unsqueeze(-2)                                           # (B2G, d_g, 1, L_in) (16, 8, 1, 2500)
-        grid = torch.cat([vgrid_scaled, dummy_y], dim=-1).unsqueeze(2)                              # (B2G, L_out, 1, 2) 여기서 2는 샘플링 할 (X,Y) 좌표를 의미함 (16, 625, 1, 2)
-        
-        ## kv_feats shape (16, 8, 625, 1)에서 squeeze 후 (16, 8, 625)로 변환됨
-        ## F.grid_sample(input, grid) ==> input : (N, C, H_int, W_int)  grid : (N, H_out, W_out, 2) ==> output : (N, C, H_out, W_out)
-        kv_feats = F.grid_sample(
-            grouped_kv_input,
-            grid,
-            mode='bilinear',
-            align_corners=True,
-            padding_mode='zeros'
-        ).squeeze(-1)
+        v = v_sampled.permute(0, 1, 3, 4, 2)  # (B, H, N, P, D)
+        out = (attn * v).sum(dim=3)                           # (B, H, N, D)
 
-        kv_feats = rearrange(kv_feats, '(b g) d n -> b (g d) n', b=2 * B)   ## (2, 64, 625)
-        
-        # === K, V ===
-        k, v = self.to_k(kv_feats), self.to_v(kv_feats)
-        q = q * self.scale
-
-        q, k, v = map(lambda t: rearrange(t, 'b (h d) n -> b h n d', h=heads), (q, k, v))       
-        q = q.expand(2,-1,-1,-1)        ## k,v 의 batch 를 맞추기 위해 2로 확장
-        ## q shape : torch.Size([2, 8, 2500, 64])
-        ## k shape : torch.Size([2, 8, 625, 64])
-        ## v shape : torch.Size([2, 8, 625, 64])
-
-        similarity = einsum('b h i d, b h j d -> b h i j', q, k)
-        
-        similarity = torch.clamp(similarity, -5, 5)
-        atten = similarity.softmax(dim=-1)
-        atten = self.dropout(atten)
-
-        out = einsum('b h i j, b h j d -> b h i d', atten, v)
-        out = rearrange(out, 'b h n d -> b (h d) n')
-        out = self.to_out(out)
-        out = rearrange(out, 'b d n -> b n d')
-
-        # === prev/current 평균 ===
-        out = out.view(2, B, N, -1).permute(2, 3, 1, 0)
-        out = out.mean(-1).permute(2, 0, 1)  # (B, N, D)
-
+        out = out.permute(0, 1, 3, 2).reshape(B, -1, N)       # (B, inner_dim, N)
+        out = self.to_out(out).transpose(1, 2)                # (B, N, D)
         return out, offsets
-
+    
 class TSABlock(nn.Module):
     def __init__(self, deformable_block : DeformableAttention1D, feedforward_block : FeedforwardBlock, dropout : float, normalized_shape ):
         super().__init__()

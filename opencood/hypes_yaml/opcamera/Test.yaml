@@ -4,7 +4,7 @@ validate_dir: '/scratch/sglee6/opv2v_dataset/validate'
 
 train_params:
   batch_size: &batch_size 1
-  epoches: &epoches 100
+  epoches: &epoches 150
   eval_freq: 10
   save_freq: 10
   debug_scenario_ids: [0, 1, 2, 3, 4]
@@ -19,7 +19,7 @@ fusion:
 data_augment: []
 add_data_extension: ['bev_dynamic.png', 'bev_static.png', 'bev_lane.png', 'bev_visibility.png', 'bev_visibility_corp.png','merged_bev_dynamic.png','merged_bev_static.png','merged_bev_lane.png']
 label_generation : false ## true or false
-chunk_size : 5
+chunk_size : 3
 
 # preprocess-related
 preprocess:
@@ -73,7 +73,7 @@ model:
       large_bev_size : 400
       patch_size :  8
       N : 6
-      h : 8
+      h : 4
       dropout : 0.1 
       d_feed_forward : 1024
       device : 'cuda'

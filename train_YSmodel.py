@@ -204,7 +204,7 @@ def main():
         if opt.rank == 0:
             pbar2 = tqdm.tqdm(total=len(train_loader), leave=True)
         
-        accum_loss = 0.0
+        accum_loss = []
         
         for i,scenario_batch in enumerate(train_loader):
             scenario_id_check = scenario_batch['ego']['scenario_id'][0]
@@ -214,7 +214,7 @@ def main():
             
             prev_encoding_result = None
             
-            accumulation_steps = 2
+            # accumulation_steps = 2
             
             record_len = scenario_batch['ego']['record_len']
             
@@ -281,6 +281,8 @@ def main():
                             is_train=True
                         )
                         
+                        # print(f"current_encoding_result shape : {current_encoding_result.shape}")
+                        
                         assert torch.isfinite(current_encoding_result).all(), "NaN found in encoding result!"
                         
                         if prev_encoding_result is None:
@@ -310,26 +312,39 @@ def main():
                         # print("GT static shape:", gt_tick['gt_static'].shape)
                         # print("Static output min/max:", model_output_dict['static_seg'].min(), model_output_dict['static_seg'].max())
                         
-                        final_loss = criterion(model_output_dict, gt_tick) / accumulation_steps
-                        accum_loss += final_loss
+                        # final_loss = criterion(model_output_dict, gt_tick, current_epoch=epoch) / accumulation_steps
+                        final_loss = criterion(model_output_dict, gt_tick, current_epoch=epoch)
+                        # accum_loss.append(final_loss)
                         # print(f"Total Loss : {final_loss}")
-                        
-                with torch.no_grad():
-                    prev_encoding_result = current_encoding_result.detach()
+
+                # with torch.no_grad():
+                prev_encoding_result = current_encoding_result.detach()
                 
-                if (tick_idx + 1) % accumulation_steps == 0 or (tick_idx + 1) == record_len :
-                    if not opt.half:
-                        accum_loss.backward()
-                        optimizer.step()
-                        scheduler.update()
-                    else:
-                        scaler.scale(accum_loss).backward()
-                        scaler.step(optimizer)
-                        scaler.update()
-                        
-                    optimizer.zero_grad()
-                    scheduler.step(epoch)
-                    accum_loss = 0.0
+                # total_loss = torch.stack(accum_loss).sum()
+                # if (tick_idx + 1) % accumulation_steps == 0 or (tick_idx + 1) == record_len :
+                if not opt.half:
+                    final_loss.backward()
+                    optimizer.step()
+                    scheduler.update()
+                else:
+                    scaler.scale(final_loss).backward()
+                    scaler.step(optimizer)
+                    scaler.update()
+                
+                # 🔍 여기에 gradient 확인
+                # no_decay_keywords = ['bias', 'norm', 'to_q', 'to_k', 'to_v']
+                # for name, param in model.named_parameters():
+                #     print(f"{'No decay':<10} → {name}") if any(k in name for k in no_decay_keywords) else print(f"{'Decay':<10} → {name}")
+                #     if param.grad is not None:
+                #         print(f"{name}: {param.grad.abs().mean():.6f}")
+                
+                for name, param in model.named_parameters():
+                    if 'to_q.weight' in name or 'to_k.weight' in name or 'to_v.weight' in name:
+                        print(f"{name} grad norm: {param.grad.norm().item():.6f}")
+
+                optimizer.zero_grad()
+                scheduler.step(epoch)
+                # accum_loss = []
                     
                 # print('--------------------------------------------------')
             

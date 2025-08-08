@@ -171,6 +171,33 @@ def create_loss(hypes):
     return criterion
 
 
+# def setup_optimizer(hypes, model):
+#     """
+#     Create optimizer corresponding to the yaml file
+
+#     Parameters
+#     ----------
+#     hypes : dict
+#         The training configurations.
+#     model : opencood model
+#         The pytorch model
+#     """
+#     method_dict = hypes['optimizer']
+#     optimizer_method = getattr(optim, method_dict['core_method'], None)
+#     print('optimizer method is: %s' % optimizer_method)
+
+#     if not optimizer_method:
+#         raise ValueError('{} is not supported'.format(method_dict['name']))
+#     if 'args' in method_dict:
+#         return optimizer_method(filter(lambda p: p.requires_grad,
+#                                        model.parameters()),
+#                                 lr=method_dict['lr'],
+#                                 **method_dict['args'])
+#     else:
+#         return optimizer_method(filter(lambda p: p.requires_grad,
+#                                        model.parameters()),
+#                                 lr=method_dict['lr'])
+
 def setup_optimizer(hypes, model):
     """
     Create optimizer corresponding to the yaml file
@@ -187,16 +214,35 @@ def setup_optimizer(hypes, model):
     print('optimizer method is: %s' % optimizer_method)
 
     if not optimizer_method:
-        raise ValueError('{} is not supported'.format(method_dict['name']))
-    if 'args' in method_dict:
-        return optimizer_method(filter(lambda p: p.requires_grad,
-                                       model.parameters()),
-                                lr=method_dict['lr'],
-                                **method_dict['args'])
-    else:
-        return optimizer_method(filter(lambda p: p.requires_grad,
-                                       model.parameters()),
-                                lr=method_dict['lr'])
+        raise ValueError('{} is not supported'.format(method_dict['core_method']))
+
+    # ✅ weight decay 분리 기준 정의
+    no_decay_keywords = ['bias', 'norm', 'to_q', 'to_k', 'to_v']
+    decay_params, no_decay_params = [], []
+
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            continue
+        if any(key in name.lower() for key in no_decay_keywords):
+            no_decay_params.append(param)
+        else:
+            decay_params.append(param)
+
+    # ✅ weight decay 값 가져오기
+    weight_decay = method_dict['args'].get('weight_decay', 0.0)
+    lr = method_dict['lr']
+    args = method_dict['args']
+    args = {k: v for k, v in args.items() if k != 'weight_decay'}  # 제거
+
+    # ✅ optimizer 생성
+    return optimizer_method(
+        [
+            {'params': no_decay_params, 'weight_decay': 0.0},
+            {'params': decay_params, 'weight_decay': weight_decay}
+        ],
+        lr=lr,
+        **args
+    )
 
 
 def setup_lr_schedular(hypes, optimizer, n_iter_per_epoch):

@@ -4,6 +4,7 @@ import cv2
 import numpy as np
 from einops import rearrange
 import torch.nn.functional as F
+import matplotlib.pyplot as plt
 
 class FocalLoss(nn.Module):
     def __init__(self, gamma=2.0, weight=None):
@@ -17,7 +18,71 @@ class FocalLoss(nn.Module):
         p = torch.exp(-ce_loss)
         focal_loss = ((1 - p) ** self.gamma) * ce_loss
         return focal_loss.mean()
+    
+class DiceLoss(nn.Module):
+    def __init__(self, class_idx=1, smooth=1.0):
+        super().__init__()
+        self.class_idx = class_idx  # vehicle class
+        self.smooth = smooth
 
+    def forward(self, inputs, targets):
+        """
+        inputs: (B, C, H, W) - raw logits
+        targets: (B, H, W) - long
+        """
+        # softmax 후 해당 클래스만 선택
+        inputs = F.softmax(inputs, dim=1)[:, self.class_idx, :, :]  # (B, H, W)
+        targets = (targets == self.class_idx).float()  # binary mask (B, H, W)
+
+        inputs = inputs.contiguous().view(-1)
+        targets = targets.contiguous().view(-1)
+
+        intersection = (inputs * targets).sum()
+        dice = (2. * intersection + self.smooth) / (inputs.sum() + targets.sum() + self.smooth)
+        return 1 - dice
+
+def dilate_label_tensor(label_tensor, kernel_size=3, iterations=1):
+    """
+    label_tensor: torch.Tensor of shape (B, H, W), dtype long
+    dilation은 class==1 (vehicle class)에만 적용됨
+    """
+    label_np = label_tensor.cpu().numpy()  # numpy로 변환
+    dilated_np = np.zeros_like(label_np)
+
+    kernel = np.ones((kernel_size, kernel_size), np.uint8)
+
+    for b in range(label_np.shape[0]):
+        # class == 1 인 영역만 dilation
+        vehicle_mask = (label_np[b] == 1).astype(np.uint8)
+        dilated = cv2.dilate(vehicle_mask, kernel, iterations=iterations)
+
+        # dilated == 1인 영역을 class 1로, 나머지는 원래대로
+        dilated_label = label_np[b]
+        dilated_label[dilated == 1] = 1
+        dilated_np[b] = dilated_label
+
+    # 다시 torch.Tensor로 변환
+    return torch.from_numpy(dilated_np).to(label_tensor.device)
+
+# def visualize_dilation(original: torch.Tensor, dilated: torch.Tensor, idx: int = 0):
+#     """
+#     original, dilated: (B, H, W) torch.Tensor
+#     idx: 시각화할 batch index
+#     """
+#     orig = original[idx].cpu().numpy()
+#     dila = dilated[idx].cpu().numpy()
+
+#     fig, axs = plt.subplots(1, 2, figsize=(10, 5))
+#     axs[0].imshow(orig, cmap='gray')
+#     axs[0].set_title('Original Label')
+#     axs[1].imshow(dila, cmap='gray')
+#     axs[1].set_title('Dilated Label')
+#     for ax in axs:
+#         ax.axis('off')
+#     plt.tight_layout()
+#     plt.savefig(f"dialated_fig/4_dilated_label_debug.png")
+#     plt.close()
+    
 class VanillaSegLoss(nn.Module):
     def __init__(self, args):
         super(VanillaSegLoss, self).__init__()
@@ -38,10 +103,12 @@ class VanillaSegLoss(nn.Module):
                 weight=torch.Tensor([1., self.s_weights, self.l_weights]).cuda())       ## [Class 0 weight : 1, Class 1 : self.s_weights, Class 2 : self.l_weights]
         self.loss_func_dynamic = \
             FocalLoss(gamma=2.0,weight=torch.Tensor([1.,self.d_weights]).cuda())
-      
+        
+        self.dice_loss_dynamic = DiceLoss(class_idx=1)
+        
         self.loss_dict = {}
 
-    def forward(self, output_dict, gt_dict):
+    def forward(self, output_dict, gt_dict,  current_epoch=0):
         """
         Perform loss function on the prediction.
 
@@ -69,21 +136,27 @@ class VanillaSegLoss(nn.Module):
         dynamic_gt = gt_dict['gt_dynamic']
         static_gt = rearrange(static_gt, 'b l h w -> (b l) h w')
         dynamic_gt = rearrange(dynamic_gt, 'b l h w -> (b l) h w')
-
+        
+        if current_epoch < 50:
+            dynamic_gt = dilate_label_tensor(dynamic_gt,kernel_size=5,iterations=4)
+        # visualize_dilation(dynamic_gt, dilated_dynamic_gt, idx=0)
         dynamic_gt = dynamic_gt.long()
         static_gt = static_gt.long()
         
         if self.target == 'dynamic':
             dynamic_pred = rearrange(dynamic_pred, 'b l c h w -> (b l) c h w')
-            
+            print("Foreground channel mean:", dynamic_pred[:, 1].mean().item())
+
             pred_dynamic_class = dynamic_pred.argmax(dim=1)
             unique_classes = torch.unique(pred_dynamic_class)
-            print(f"Dynamic prediction unique class : {unique_classes.tolist()}")
-            print(f"Dynamic GT unique classes: {torch.unique(dynamic_gt).tolist()}")
+            # print(f"Dynamic prediction unique class : {unique_classes.tolist()}")
+            # print(f"Dynamic GT unique classes: {torch.unique(dynamic_gt).tolist()}")
             vehicle_ratio = (dynamic_gt == 1).float().mean()
             print(f"GT Foreground(vehicle) pixel 비율: {vehicle_ratio.item():.5f}")
 
-            dynamic_loss = self.loss_func_dynamic(dynamic_pred, dynamic_gt)
+            dynamic_focal = self.loss_func_dynamic(dynamic_pred, dynamic_gt)
+            dynamic_dice = self.dice_loss_dynamic(dynamic_pred, dynamic_gt)
+            dynamic_loss = 0.5 * dynamic_focal + 0.5 * dynamic_dice
 
         elif self.target == 'static':
             static_pred = rearrange(static_pred, 'b l c h w -> (b l) c h w')
@@ -109,13 +182,11 @@ class VanillaSegLoss(nn.Module):
             static_loss = self.loss_func_static(static_pred, static_gt)
             assert torch.isfinite(static_loss).all(), f"static_loss: {static_loss}"
 
+
         offset_loss = 0
         pos_loss = output_dict['pos_loss'][0]
-        offsets = output_dict['offsets']  # shape: (B, T, C, H, W)
-        for offsets in output_dict['offsets'][0]:
-            offset_loss += offsets.abs().mean()
+        offset_loss = sum(offset.abs().mean() for offset in output_dict['offsets'][0])
 
-        
         total_loss = self.s_coe * static_loss + self.d_coe * dynamic_loss + self.p_coe * pos_loss + self.o_coe* offset_loss
         self.loss_dict.update({'total_loss': total_loss,
                                'static_loss': static_loss,
