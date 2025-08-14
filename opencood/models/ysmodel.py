@@ -91,26 +91,43 @@ normalize_img = SafeNormalize(mean=[0.485, 0.456, 0.406],
                                std=[0.229, 0.224, 0.225])
 
 class Up(nn.Module):
-    def __init__(self, in_channels, out_channels, scale_factor=2):
+    """
+    U-Net style up block (2D)
+    - x1: low-res feature (to be upsampled)
+    - x2: skip connection (same spatial size as target)
+    - in_channels = channels(x1_up) + channels(x2)
+    - out_channels = output channels of this block
+    자동으로 H, W 불일치시 패딩해 정렬합니다.
+    """
+    def __init__(self, in_channels, out_channels, scale_factor=2, align_corners=True):
         super().__init__()
+        self.up = nn.Upsample(scale_factor=scale_factor, mode='bilinear', align_corners=align_corners)
 
-        # 3차원: trilinear / 2차원: bilinear
-        self.up = nn.Upsample(scale_factor=scale_factor, mode='bilinear',
-                              align_corners=True)
-        
+        G = pick_num_groups(out_channels)
         self.conv = nn.Sequential(
             nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1, bias=False),
-            nn.BatchNorm2d(out_channels),
+            nn.GroupNorm(G, out_channels),
             nn.ReLU(inplace=True),
             nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1, bias=False),
-            nn.BatchNorm2d(out_channels),
-            nn.ReLU(inplace=True)
+            nn.GroupNorm(G, out_channels),
+            nn.ReLU(inplace=True),
         )
-        
+
     def forward(self, x1, x2):
+        # upsample low-res
         x1 = self.up(x1)
-        x1 = torch.cat([x2, x1], dim=1)
-        return self.conv(x1)
+
+        # shape-safe: pad x1 to match x2 (H,W)
+        if x1.shape[-2:] != x2.shape[-2:]:
+            diff_y = x2.size(-2) - x1.size(-2)
+            diff_x = x2.size(-1) - x1.size(-1)
+            # pad = [left, right, top, bottom]
+            x1 = F.pad(x1, [diff_x // 2, diff_x - diff_x // 2,
+                            diff_y // 2, diff_y - diff_y // 2])
+
+        # concat along channels
+        x = torch.cat([x2, x1], dim=1)
+        return self.conv(x)
     
 @contextlib.contextmanager
 def suppress_stdout():
@@ -174,11 +191,18 @@ def get_pixel_coords_3d(coords_d, depth, cam_param,
     return coords3d, coords_d
 
 
+def pick_num_groups(C, prefs=(32, 16, 8, 4, 2, 1)):
+    for g in prefs:
+        if C % g == 0:
+            return g
+    return 1  # 최후에는 InstanceNorm처럼 동작
+
 class CamEncode(nn.Module):
-    def __init__(self, C, depth_num=64, depth_start=1, depth_end=61, error_tolerance=1.0, img_h=256, img_w=256, in_channels=[256, 512, 1024, 2048],interm_c= 128,out_c: Optional[int] = 3):
-        
-        super(CamEncode, self).__init__()
-        self.C = C 
+    def __init__(self, C, depth_num=64, depth_start=1, depth_end=61,
+                 error_tolerance=1.0, img_h=256, img_w=256,
+                 in_channels=[256, 512, 1024, 2048], interm_c=128, out_c: int = 3):
+        super().__init__()
+        self.C = C
         self.depth_num = depth_num
         self.depth_start = depth_start
         self.depth_end = depth_end
@@ -186,17 +210,22 @@ class CamEncode(nn.Module):
         self.img_h = img_h
         self.img_w = img_w
         self.bins = self.init_bin_centers()
+
         in_c = 3
 
         with suppress_stdout():
             self.trunk = EfficientNet.from_pretrained("efficientnet-b0")
-        
-        self.up1 = Up(320+112, 512) # Adjusted sizes for ResNet-50
-        self.depthnet = nn.Conv2d(512, self.depth_num + self.C, kernel_size=1, padding=0) ## ??
+
+        # Up은 위에서 고친 버전
+        self.up1 = Up(320 + 112, 512)
+
+        self.depthnet = nn.Conv2d(512, self.depth_num + self.C, kernel_size=1, padding=0)
+
+        Gi = pick_num_groups(interm_c)
 
         self.feats = nn.Sequential(
             nn.Conv2d(in_c, interm_c, kernel_size=3, padding=1, bias=False),
-            nn.BatchNorm2d(interm_c),
+            nn.GroupNorm(Gi, interm_c),
             nn.ReLU(inplace=True),
             BottleneckBlock(interm_c),
             BottleneckBlock(interm_c),
@@ -205,13 +234,13 @@ class CamEncode(nn.Module):
         )
 
         self.depth = nn.Sequential(
-            nn.Conv2d(in_c, interm_c, kernel_size=3, padding=1),
-            nn.BatchNorm2d(interm_c),
+            nn.Conv2d(in_c, interm_c, kernel_size=3, padding=1, bias=False),
+            nn.GroupNorm(Gi, interm_c),
             nn.ReLU(inplace=True),
             BottleneckBlock(interm_c),
             BottleneckBlock(interm_c),
             BottleneckBlock(interm_c),
-            nn.Conv2d(interm_c, depth_num, kernel_size=1, padding=0)
+            nn.Conv2d(interm_c, depth_num, kernel_size=1, padding=0),
         )
 
     """
@@ -339,45 +368,66 @@ class CamEncode(nn.Module):
         #cov3D = rearrange(cov3D, '(b n) h w d -> b n d h w',b=b, n=n)
 
         return features, means3D, cov3D
-    
+
+
+def replace_bn_with_gn(module: nn.Module):
+    for name, m in list(module.named_children()):
+        if isinstance(m, (nn.BatchNorm2d, nn.BatchNorm3d)):
+            C = m.num_features
+            setattr(module, name, nn.GroupNorm(pick_num_groups(C), C, affine=True))
+        else:
+            replace_bn_with_gn(m)
+    return module
 class BEVEncode(nn.Module):
     def __init__(self, inC=3, outC=64):
         super(BEVEncode, self).__init__()
-        
+
+        # ResNet18 backbone
         trunk = models.resnet18(pretrained=True)
-        trunk.zero_init_residual = True  # 따로 설정 필요
+        trunk.zero_init_residual = True
+
+        # BN → GN (배치 1에서도 안정)
+        trunk = replace_bn_with_gn(trunk)
+
+        # stem
         self.conv1 = nn.Conv2d(inC, 64, kernel_size=7, stride=2, padding=3, bias=False)
-        self.bn1 = trunk.bn1
-        self.relu = trunk.relu
+        self.bn1   = nn.GroupNorm(pick_num_groups(64), 64)
+        self.relu  = nn.ReLU(inplace=True)
+        # 주의: trunk.maxpool는 사용하지 않음(해상도 보존 전략 유지)
 
-        self.layer1 = trunk.layer1 # (batch, 64, 56, 56) > (batch, 256, 56, 56)
-        self.layer2 = trunk.layer2 # (batch, 256, 56, 56) > (batch, 512, 28, 28)
-        self.layer3 = trunk.layer3 # (batch, 512, 28, 28) > (batch, 1024, 14, 14)
+        # ResNet stages (resnet18: 64, 128, 256, 512)
+        self.layer1 = trunk.layer1  # (B, 64,  H/2,  W/2)
+        self.layer2 = trunk.layer2  # (B, 128, H/4,  W/4)
+        self.layer3 = trunk.layer3  # (B, 256, H/8,  W/8)
+        # layer4는 사용하지 않음
 
-        # 아마 사이즈 수정 필요할 듯!! 
-        self.up1 = Up(64+256, 256, scale_factor=4)
+        # Up: x3(256ch, H/8) ↑x4 -> H/2, x1(64ch, H/2)와 concat → 320ch → 256ch
+        self.up1 = Up(in_channels=256 + 64, out_channels=256, scale_factor=4)
+
+        # 최종 업/헤드: 256 → 128 → outC
+        G128 = pick_num_groups(128)
         self.up2 = nn.Sequential(
-            nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True),
+            nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True),  # H/2 → H
             nn.Conv2d(256, 128, kernel_size=3, padding=1, bias=False),
-            nn.BatchNorm2d(128),
+            nn.GroupNorm(G128, 128),
             nn.ReLU(inplace=True),
-            nn.Conv2d(128, outC, kernel_size=1, padding=0),
+            nn.Conv2d(128, outC, kernel_size=1, padding=0, bias=True),
         )
 
     def forward(self, x):
-        x = x.to(dtype=torch.float32)  # Ensure input is float32
-        # print("input dtype:", x.dtype)
-        # print("model weight dtype:", self.conv1.weight.dtype)
+        x = x.to(dtype=torch.float32)
+
         x = self.conv1(x)
         x = self.bn1(x)
         x = self.relu(x)
+        # (maxpool 미사용)
 
-        x1 = self.layer1(x)
-        x2 = self.layer2(x1)
-        x3 = self.layer3(x2)
+        x1 = self.layer1(x)   # (B, 64,  H/2, W/2)
+        x2 = self.layer2(x1)  # (B, 128, H/4, W/4)  # (현재 경로에서는 직접 사용 안 함)
+        x3 = self.layer3(x2)  # (B, 256, H/8, W/8)
 
-        x = self.up1(x3, x1)
-        x = self.up2(x) 
+        x  = self.up1(x3, x1) # → (B, 256, H/2, W/2)
+        x  = self.up2(x)      # → (B, outC, H, W)
 
         return x
 
@@ -391,28 +441,39 @@ class LSS(nn.Module):
         xbound = grid_conf['xbound']
         ybound = grid_conf['ybound']
         zbound = grid_conf['zbound']
-        dx = torch.as_tensor([row[2] for row in [xbound, ybound, zbound]])
-        bx = torch.as_tensor([row[0] + row[2]/2.0 for row in [xbound, ybound, zbound]])
-        nx = torch.LongTensor([(row[1] - row[0]) / row[2] for row in [xbound, ybound, zbound]])
 
-        self.dx = nn.Parameter(dx, requires_grad=False)
-        self.bx = nn.Parameter(bx, requires_grad=False)
-        self.nx = nn.Parameter(nx, requires_grad=False)
+        # ----- bounds → (dx, bx, nx) -----
+        # dx, bx: float buffer / nx: long buffer
+        dx = torch.tensor([row[2] for row in (xbound, ybound, zbound)], dtype=torch.float32)
+        bx = torch.tensor([row[0] + row[2] / 2.0 for row in (xbound, ybound, zbound)], dtype=torch.float32)
+        nx = torch.tensor([int((row[1] - row[0]) / row[2]) for row in (xbound, ybound, zbound)], dtype=torch.long)
 
+        # 학습 파라미터 X → buffer로 등록
+        self.register_buffer('dx', dx, persistent=True)
+        self.register_buffer('bx', bx, persistent=True)
+        self.register_buffer('nx', nx, persistent=True)
 
+        # ----- encoders -----
         self.downsample = 8
         self.camC = 64
-        self.frustum = self.create_frustum()
+
+        self.frustum = self.create_frustum()               # (D, Hf, Wf, 3) 같은 형태일 것
+        self.register_buffer('frustum_buf', self.frustum)  # 필요하면 buffer로
         self.D, _, _, _ = self.frustum.shape
-        self.camencode = CamEncode(self.camC) # (41, 64, 16) > (41, 64, 16, 128, 352, 64)
-        self.bevencode = BEVEncode()
+
+        self.camencode = CamEncode(self.camC)              # 카메라 피처
+        self.bevencode = BEVEncode(outC=self.outC)         # BEV 피처
+
         self.use_quickcumsum = True
+
+        # ----- 3D Head (GN 올바르게) -----
+        G = pick_num_groups(self.outC)
         self.final_voxel_feature = nn.Sequential(
             nn.Conv3d(self.outC * 2, self.outC, kernel_size=3, padding=1, bias=False),
-            nn.BatchNorm3d(self.outC),
+            nn.GroupNorm(G, self.outC),    # ✓ num_groups, num_channels
             nn.ReLU(inplace=True),
             nn.Conv3d(self.outC, self.outC, kernel_size=3, padding=1, bias=False),
-            nn.BatchNorm3d(self.outC),
+            nn.GroupNorm(G, self.outC),    # ✓
             nn.ReLU(inplace=True)
         )
 
@@ -739,7 +800,7 @@ def Encoding(img_inputs, intrinsics, extrinsics, data_aug_conf, grid_conf, is_tr
         torch.stack(all_post_trans).to(device),
         extrinsics.to(device)
     )
-
+    
     return encoded_bev, vis_encoded_bev
 
 # 간단한 BEV 시각화 함수
@@ -861,14 +922,20 @@ class Scale(nn.Module):
         return x * self.scale  # ✔️ now tracked
 
 class PatchEmbed(nn.Module):
-    def __init__(self, img_size=400, patch_size=16, in_channels=64, embed_dim=64):
+    def __init__(self, img_size=400, patch_size=16, stride=None, in_channels=64, embed_dim=64):
         super().__init__()
-        self.proj = nn.Conv2d(in_channels, embed_dim, kernel_size=patch_size, stride=patch_size)
+        stride = stride or patch_size
+        pad = (patch_size - stride) // 2 if stride < patch_size else 0
+        self.proj = nn.Conv2d(in_channels, embed_dim, kernel_size=patch_size, stride=stride,
+                              padding=pad, bias=False)
+        self.norm = nn.LayerNorm(embed_dim)
 
-    def forward(self, x):  # x: [B, C, H, W]
-        x = self.proj(x)   # [B, embed_dim, H/patch, W/patch]
-        x = x.flatten(2).transpose(1, 2)  # [B, N, embed_dim]
-        return x
+    def forward(self, x):                      # x: [B, C, H, W]
+        x = self.proj(x)                      # [B, E, H', W']
+        B, E, H, W = x.shape
+        x = x.flatten(2).transpose(1, 2)      # [B, N=H'*W', E]
+        x = self.norm(x)
+        return x, H, W                        # 2D 크기도 반환(PE용)
 
 
 ################################################################################################################################
@@ -936,261 +1003,452 @@ class ConvBlock(nn.Module):
         return self.block(x)
 
 class PatchDecoder(nn.Module):
-    def __init__(self, emb_dim=64):
+    def __init__(self, emb_dim=64, out_hw=None):
         super().__init__()
+        self.out_hw = out_hw
         self.input_proj = nn.Conv2d(emb_dim, emb_dim, kernel_size=3, padding=1)
-        
         # Encoder
         self.enc1 = ConvBlock(emb_dim, 128)
         self.down1 = nn.Conv2d(128, 128, kernel_size=3, stride=2, padding=1)
-
         self.enc2 = ConvBlock(128, 256)
         self.down2 = nn.Conv2d(256, 256, kernel_size=3, stride=2, padding=1)
-
         self.enc3 = ConvBlock(256, 512)
-
         # Decoder
         self.up2 = nn.ConvTranspose2d(512, 256, kernel_size=2, stride=2)
         self.dec2 = ConvBlock(512, 256)
-
         self.up1 = nn.ConvTranspose2d(256, 128, kernel_size=2, stride=2)
         self.dec1 = ConvBlock(256, 128)
-
         self.up0 = nn.ConvTranspose2d(128, 64, kernel_size=2, stride=2)
         self.final_conv = nn.Conv2d(64, emb_dim, kernel_size=3, padding=1)
-        self.out_relu = nn.ReLU()
+        # self.out_relu = nn.ReLU()
 
-    def forward(self, x):
+    def forward(self, x,):   # ← 추가: (H_out, W_out)
         B, N, C = x.shape
         H = W = int(N ** 0.5)
         assert H * W == N, "N must be a perfect square"
 
-        x = x.transpose(1, 2).reshape(B, C, H, W)  # [B, 64, 25, 25]
-        x = self.input_proj(x)                    # [B, 64, 25, 25]
+        x = x.transpose(1, 2).reshape(B, C, H, W)  # [B, 64, H, W]
+        x = self.input_proj(x)
 
-        x1 = self.enc1(x)                         # [B, 128, 25, 25]
-        x1_down = self.down1(x1)                  # [B, 128, 13, 13]
+        x1 = self.enc1(x)
+        x1_down = self.down1(x1)
 
-        x2 = self.enc2(x1_down)                   # [B, 256, 13, 13]
-        x2_down = self.down2(x2)                  # [B, 256, 7, 7]
+        x2 = self.enc2(x1_down)
+        x2_down = self.down2(x2)
 
-        x3 = self.enc3(x2_down)                   # [B, 512, 7, 7]
+        x3 = self.enc3(x2_down)
 
-        d2 = self.up2(x3)                         # [B, 256, 14, 14]
+        d2 = self.up2(x3)
         x2 = F.interpolate(x2, size=d2.shape[-2:], mode='bilinear', align_corners=False)
-        d2 = self.dec2(torch.cat([d2, x2], dim=1))  # [B, 256, 14, 14]
+        d2 = self.dec2(torch.cat([d2, x2], dim=1))
 
-        d1 = self.up1(d2)                         # [B, 128, 28, 28]
+        d1 = self.up1(d2)
         x1 = F.interpolate(x1, size=d1.shape[-2:], mode='bilinear', align_corners=False)
-        d1 = self.dec1(torch.cat([d1, x1], dim=1))  # [B, 128, 28, 28]
+        d1 = self.dec1(torch.cat([d1, x1], dim=1))
 
-        d0 = self.up0(d1)                         # [B, 64, 56, 56]
+        d0 = self.up0(d1)
 
-        out = F.interpolate(d0, size=(512, 512), mode='bilinear', align_corners=False)
-        out = self.final_conv(out)               # [B, 64, 512, 512]
-        out = self.out_relu(out)
-        
+        # 마지막 업샘플을 라벨 크기에 맞춤 (기본은 d0 그대로)
+        if self.out_hw is not None:
+            out = F.interpolate(d0, size=self.out_hw, mode='bilinear', align_corners=False)
+        else:
+            out = d0
+
+        out = self.final_conv(out)
+        # out = self.out_relu(out)
         return out
 
 
 ################################################################################################################################
 ################################################################################################################################
     
-## Positional Encoding
-class PositionalEncodeing(nn.Module):
-    def __init__(self, d_model : int, seq_len : int, dropout : float,device='cpu') -> None:
+def build_2d_sincos(H: int, W: int, dim: int, device, dtype=None):
+    assert dim % 4 == 0, f"d_model={dim} must be divisible by 4"
+    dtype = dtype or torch.float32
+    d = dim // 4
+
+    # 열벡터 형태로 만들어서 outer-product 느낌으로 안전하게 계산
+    y = torch.arange(H, device=device, dtype=dtype).unsqueeze(1)  # (H,1)
+    x = torch.arange(W, device=device, dtype=dtype).unsqueeze(1)  # (W,1)
+
+    wy = 1.0 / (10000 ** (torch.arange(d, device=device, dtype=dtype) / d))  # (d,)
+    wx = 1.0 / (10000 ** (torch.arange(d, device=device, dtype=dtype) / d))  # (d,)
+
+    # (H,1) @ (1,d) -> (H,d), (W,1) @ (1,d) -> (W,d)
+    pos_y = y @ wy.unsqueeze(0)                # (H, d)
+    pos_x = x @ wx.unsqueeze(0)                # (W, d)
+
+    pe_y = torch.cat([torch.sin(pos_y), torch.cos(pos_y)], dim=1)  # (H, 2d)
+    pe_x = torch.cat([torch.sin(pos_x), torch.cos(pos_x)], dim=1)  # (W, 2d)
+
+    # (H,W,2d) + (H,W,2d) -> (H,W,4d) -> (1, H*W, dim)
+    pe = torch.cat(
+        [
+            pe_y[:, None, :].expand(H, W, -1),
+            pe_x[None, :, :].expand(H, W, -1),
+        ],
+        dim=2,
+    ).reshape(1, H * W, dim).to(dtype=dtype, device=device)
+
+    return pe
+
+class PositionalEncoding(nn.Module):
+    def __init__(self, d_model: int, dropout: float = 0.0):
         super().__init__()
         self.d_model = d_model
-        self.seq_len = seq_len
-        self.dropout = nn.Dropout(dropout)
+        self.drop = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
+        self.register_buffer("pe", None, persistent=False)
 
-        pe = torch.zeros(seq_len,d_model,device=device)   # positional encoding tensor 생성
-        position = torch.arange(0,seq_len, dtype=torch.float,device=device).unsqueeze(1) ## shape : [seq_len, 1]
-        _2i = torch.arange(0,d_model,2,dtype= torch.float,device=device)   ## 여기서 i는 Embedding 벡터의 차원 인덱스를 의미 2i는 짝수 인덱스
+    def forward(self, x, H, W):
+        """
+        x: (B, N, D)  with  N == H*W
+        """
+        B, N, D = x.shape
+        assert D == self.d_model, f"D mismatch: got {D}, want {self.d_model}"
+        assert N == H * W, f"N != H*W (N={N}, H*W={H*W})"
 
-        ## 0::2 => index 0부터 2 step씩 가겠다.
-        pe[:,0::2] = torch.sin(position/10000**(_2i/d_model))   ## 모든 sequence에서 짝수열의 값은 sin함수 사용 
-        pe[:,1::2] = torch.cos(position/10000**(_2i/d_model))   ## 모든 sequence에서 짝수열의 값은 cos함수 사용 
+        if (self.pe is None) or (self.pe.shape[1] != N) or (self.pe.device != x.device):
+            self.pe = build_2d_sincos(H, W, D, x.device, x.dtype)
 
-        pe = pe.unsqueeze(0)    ## 차원 추가 => shape : [1, seq_len, d_model]
-        ## register_buffer
-        ## 모듈내에서 pe이름으로 접근가능, 학습은 되지 않음, model이 다른 device로 갈때 같이 감
-        self.register_buffer('pe',pe)
+        return self.drop(x + self.pe)
 
-    def forward(self, x):
-        # print('Positional Encoding finished')
-        x = x + self.pe[:,:x.shape[1],:].requires_grad_(False)
-        return self.dropout(x)
 
 # Layer Normalization
 class LayerNormalization(nn.Module):
-    def __init__(self, eps : float = 1e-6, ) -> None:
+    def __init__(self, normalized_shape, eps=1e-6):
         super().__init__()
         self.eps = eps
-        self.alpha = nn.Parameter(torch.ones(1))
-        self.bias = nn.Parameter(torch.zeros(1))
-
+        self.alpha = nn.Parameter(torch.ones(normalized_shape))
+        self.bias  = nn.Parameter(torch.zeros(normalized_shape))
     def forward(self, x):
-        device = x.device
-
-        mean = x.mean(dim=-1,keepdim=True)      ## x shape : [batch, sentence length, dimension]
-        std = x.std(dim=-1,keepdim=True)        ## dim = -1 : 젤 마지막을 제거하겟다 -> 열을 제거하겠다 -> 행만 남긴다 -> 행방향 평균 및 분산  
-        return self.alpha.to(device) * (x-mean) / (std+self.eps) + self.bias.to(device)
+        mean = x.mean(dim=-1, keepdim=True)
+        var  = x.var(dim=-1, keepdim=True, unbiased=False)   # ✅
+        return self.alpha * (x - mean) / torch.sqrt(var + self.eps) + self.bias
     
 class FeedforwardBlock(nn.Module):
-    def __init__(self, d_model : int, d_ff :int, dropout : float,device) -> None:
+    def __init__(self, d_model, d_ff, dropout, device):
         super().__init__()
-        self.linear_1 = nn.Linear(d_model, d_ff,device=device)
-        self.dropout = nn.Dropout(dropout)
-        self.linear_2 = nn.Linear(d_ff, d_model,device=device)
+        self.linear_1 = nn.Linear(d_model, d_ff, device=device, bias=True)
+        self.act = nn.GELU()                                  # ✅ GELU
+        self.dropout1 = nn.Dropout(dropout)
+        self.linear_2 = nn.Linear(d_ff, d_model, device=device, bias=True)
+        self.dropout2 = nn.Dropout(dropout)
 
     def forward(self, x):
-        # print('Feed Forward Finished')
-        return self.linear_2(self.dropout(torch.relu(self.linear_1(x))))
+        x = self.linear_2(self.dropout1(self.act(self.linear_1(x))))
+        return self.dropout2(x)
+
     
-# Residual Connection
 class ResidualConnection(nn.Module):
-    def __init__(self, dropout, normalized_shape):
+    def __init__(self, dropout, normalized_shape, drop_path_prob=0.0):
         super().__init__()
         self.dropout = nn.Dropout(dropout)
-        self.norm = nn.LayerNorm(normalized_shape=normalized_shape)  # 실제 shape 지정 필요
+        self.norm = nn.LayerNorm(normalized_shape=normalized_shape)
+        self.gamma = nn.Parameter(torch.zeros(1))          # ✅ residual scaling
+        self.drop_path = DropPath(drop_path_prob) if drop_path_prob > 0 else nn.Identity()
 
     def forward(self, x, sublayer, return_with_aux=False):
         if return_with_aux:
             out, aux = sublayer(self.norm(x))
-            return x + self.dropout(out), aux
+            return x + self.drop_path(self.gamma * self.dropout(out)), aux
         else:
-            return x + self.dropout(sublayer(self.norm(x)))
+            out = sublayer(self.norm(x))
+            return x + self.drop_path(self.gamma * self.dropout(out))
 
+
+# ------------------------------
+# Optional: DropPath (Stochastic Depth)
+# ------------------------------
+class DropPath(nn.Module):
+    def __init__(self, drop_prob=0.0):
+        super().__init__()
+        self.drop_prob = float(drop_prob)
+    def forward(self, x):
+        if self.drop_prob == 0.0 or not self.training:
+            return x
+        keep = 1.0 - self.drop_prob
+        shape = (x.shape[0],) + (1,) * (x.ndim - 1)
+        mask = keep + torch.rand(shape, dtype=x.dtype, device=x.device)
+        mask.floor_()
+        return x / keep * mask
+
+# ------------------------------
+# Optional: RMSNorm
+# ------------------------------
+class RMSNorm(nn.Module):
+    def __init__(self, d, eps=1e-6):
+        super().__init__()
+        self.scale = nn.Parameter(torch.ones(d))
+        self.eps = eps
+    def forward(self, x):
+        return x * torch.rsqrt(x.pow(2).mean(dim=-1, keepdim=True) + self.eps) * self.scale
+
+# ------------------------------
+# 1D Deformable Attention (Deformable DETR style)
+# ------------------------------
 class DeformableAttention1D(nn.Module):
+    """
+    Query-driven 1D deformable attention
+    - 쿼리에서 reference point(정규화 [0,1]), offsets(Δ), per-point weights를 직접 예측
+    - prev_x, x를 길이축으로 concat한 메모리(2N)에서 1D 선형보간 샘플링
+    - 오프셋은 index-space로 계산하되, 반환은 기본적으로 normalized(offsets_norm = Δ / (Lm-1))
+    """
     def __init__(
         self,
-        dim,
-        dim_head=64,
-        heads=8,
-        num_points=2,
-        dropout=0.,
+        dim: int,
+        dim_head: int = 64,
+        heads: int = 8,
+        num_points: int = 4,
+        dropout: float = 0.0,
+        drop_path: float = 0.0,
+        use_rmsnorm: bool = False,
         device=None,
     ):
         super().__init__()
+        self.dim = dim
+        self.dim_head = dim_head
         self.heads = heads
         self.num_points = num_points
-        inner_dim = dim_head * heads
 
-        self.scale = dim_head ** -0.5
-        self.dropout = nn.Dropout(dropout)
+        inner = heads * dim_head
+        Norm = nn.LayerNorm if not use_rmsnorm else RMSNorm
 
-        # LayerNorm
-        self.norm_q = nn.LayerNorm(dim * 2)
-        self.norm_k = nn.LayerNorm(dim)
-        self.norm_v = nn.LayerNorm(dim)
+        # 입력 정규화
+        self.norm_q_in = Norm(dim * 2)
+        self.norm_mem  = Norm(dim)
 
+        # 프로젝션
+        self.to_q = nn.Linear(dim * 2, inner, bias=True, device=device)
+        self.to_v = nn.Linear(dim, inner, bias=True, device=device)
 
-        # Q, K, V projection
-        self.to_q = nn.Linear(dim * 2, inner_dim, bias=False, device=device)                    ## in_features (*,H_in), out_features (*,H_out) || nn.Linear(H_in, H_out)
-        self.to_k = nn.Linear(dim, inner_dim, bias=False)
-        self.to_v = nn.Linear(dim, inner_dim, bias=False)
-      
+        # 쿼리에서 ref/Δ/weights 예측
+        self.ref_proj    = nn.Linear(inner, heads, bias=True, device=device)               # (B,N,H) in [0,1] via sigmoid
+        self.delta_proj  = nn.Linear(inner, heads * num_points, bias=True, device=device)  # (B,N,H*P)
+        self.weight_proj = nn.Linear(inner, heads * num_points, bias=True, device=device)  # (B,N,H*P)
 
-        # Offset predictor: (B, H, N, P)
-        self.offset_predictor = nn.Conv1d(inner_dim, heads * num_points, 1, device=device)      ## in_features (batch, feature_dim, time_step) || nn.Conv1d(feature_dim, out_feature_dim)
-        self.offset_predictor.bias.data.uniform_(-1.0, 1.0)
-        self.attn_weight_predictor = nn.Conv1d(inner_dim, heads * num_points, 1, device=device)
+        # 출력
+        self.proj_out = nn.Linear(inner, dim, bias=True, device=device)
 
-        self.to_out = nn.Sequential(
-            nn.Conv1d(inner_dim, dim, 1, device=device),
-            nn.Dropout(dropout)
+        # 드롭
+        self.attn_dropout = nn.Dropout(dropout)
+        self.drop_path = DropPath(drop_path) if drop_path > 0 else nn.Identity()
+
+        # 오프셋 창 크기(인덱스 단위) - 학습 중 어닐링 용이
+        self.register_buffer("max_offset", torch.tensor(4.0), persistent=True)  # 초기 ±4 index 내
+
+        self.reset_parameters()
+        self.time_embed = nn.Parameter(torch.zeros(2, dim))  # [prev, cur]
+        nn.init.normal_(self.time_embed, std=1e-3)
+        
+        self.register_buffer(
+            "base_offsets",                  # (1, 1, H, P)
+            self._make_base_offsets(self.heads, self.num_points),
+            persistent=True
         )
-        
-        nn.init.xavier_uniform_(self.to_q.weight)
-        nn.init.xavier_uniform_(self.to_k.weight)
-        nn.init.xavier_uniform_(self.to_v.weight)
+    @staticmethod
+    def _make_base_offsets(H, P, stride=1.0):
+        # 예) 대칭 등간격: [-1.5, -0.5, 0.5, 1.5] (P=4일 때)
+        # index-space 단위 (길이축 인덱스)
+        import numpy as np
+        mid = (P - 1) / 2.0
+        vals = (np.arange(P) - mid) * stride  # shape: (P,)
+        base = torch.tensor(vals, dtype=torch.float32).view(1, 1, 1, P)  # (1,1,1,P)
+        base = base.expand(1, 1, H, P).contiguous()                      # (1,1,H,P)
+        return base
 
-    def forward(self, x, prev_x, use_learned_weights=False):
+    # ------------------------------
+    # 초기화: 안정적 시작을 위한 제로 초기화 전략
+    # ------------------------------
+    def reset_parameters(self):
+        nn.init.xavier_uniform_(self.to_q.weight); nn.init.zeros_(self.to_q.bias)
+        nn.init.xavier_uniform_(self.to_v.weight); nn.init.zeros_(self.to_v.bias)
+
+        # 초기에는 ref≈0.5, Δ≈0, weights 균등 → 쿼리 경로 안정화
+        nn.init.zeros_(self.ref_proj.weight);  nn.init.zeros_(self.ref_proj.bias)
+
+        # 🔧 delta/weight는 아주 작은 난수로 시작 (완전 0 금지)
+        nn.init.normal_(self.delta_proj.weight, std=1e-3)
+        nn.init.normal_(self.delta_proj.bias,   std=1e-3)
+        nn.init.normal_(self.weight_proj.weight, std=1e-3)
+        nn.init.normal_(self.weight_proj.bias,   std=1e-3)
+
+        # Residual 안정화를 위해 출력은 "거의" 제로 초기화 권장
+        # 완전 제로로도 OK. V 경로 grad를 초기에 더 주려면 std를 아주 작게.
+        nn.init.normal_(self.proj_out.weight, std=1e-3)
+        nn.init.zeros_(self.proj_out.bias)
+
+    # ------------------------------
+    # 길이축 1D 선형보간 샘플러 (gather 차원수 일치 해결 포함)
+    # ------------------------------
+    @staticmethod
+    def linear_sample_1d(v, pos, debug_name="linear_sample_1d"):
         """
-        x, prev_x: (B, N, D)
+        v:   (B, H, Lm, Dh)
+        pos: (B, N, H, P)  in [0, Lm-1] (float)
+        return: (B, N, H, P, Dh)
         """
+        B, H, Lm, Dh = v.shape
+        B2, N, H2, P = pos.shape
+        assert B == B2 and H == H2, "batch/head mismatch"
+
+        # 이중 안전: NaN 제거 + clamp
+        pos = torch.nan_to_num(pos, nan=0.0, posinf=(Lm-1.0), neginf=0.0)
+        pos = pos.clamp(0.0, float(Lm - 1))
+
+        left  = pos.floor().long()                # (B,N,H,P)
+        right = (left + 1).clamp(max=Lm - 1)     # (B,N,H,P)
+        frac  = (pos - left.float())             # (B,N,H,P)
+
+        # gather 전 OOB 진단 (이상 징후가 있으면 한 번만 출력)
+        if __debug__:
+            min_l = int(left.min().item());  max_l = int(left.max().item())
+            min_r = int(right.min().item()); max_r = int(right.max().item())
+            if min_l < 0 or max_r >= Lm:
+                invalid = ((left < 0) | (right >= Lm)).sum().item()
+                print(f"[{debug_name}] OOB idx before clamp? left[{min_l},{max_l}] right[{min_r},{max_r}] Lm={Lm} invalid={invalid}")
+
+        # (B,H,N,P) 정렬
+        left_ph  = left.permute(0, 2, 1, 3).contiguous()
+        right_ph = right.permute(0, 2, 1, 3).contiguous()
+        frac_ph  = frac.permute(0, 2, 1, 3).contiguous().unsqueeze(-1)  # (B,H,N,P,1)
+
+        # (BH, Lm, Dh)로 평탄화
+        v_flat = v.contiguous().reshape(B * H, Lm, Dh)
+
+        def _safe_gather(idx_bhnp: torch.Tensor):
+            BH = B * H
+            N_, P_ = idx_bhnp.shape[2], idx_bhnp.shape[3]
+            NP = N_ * P_
+            idx_flat = idx_bhnp.reshape(BH, NP).unsqueeze(-1).expand(BH, NP, Dh)  # (BH,NP,Dh)
+
+            # 최종 안전 clamp (정말로 OOB면 여기서도 잡힘)
+            idx_flat = torch.clamp(idx_flat, 0, Lm - 1)
+
+            gathered = torch.gather(v_flat, dim=1, index=idx_flat)                # (BH,NP,Dh)
+            return gathered.view(B, H, N_, P_, Dh)                                # (B,H,N,P,Dh)
+
+        v_left  = _safe_gather(left_ph)
+        v_right = _safe_gather(right_ph)
+
+        sampled = (1.0 - frac_ph) * v_left + frac_ph * v_right                    # (B,H,N,P,Dh)
+        return sampled.permute(0, 2, 1, 3, 4).contiguous()                        # (B,N,H,P,Dh)
+
+
+    # ------------------------------
+    # 어닐링: 오프셋 창 크기 점진 확대 (index-space)
+    # ------------------------------
+    @torch.no_grad()
+    def set_offset_window(self, epoch: int, total_epoch: int, base: float = 4.0, max_win: float = 64.0, warm_ratio: float = 0.3):
+        """
+        epoch 진행에 따라 max_offset을 base→max_win로 선형 확대
+        warm_ratio: 총 에폭 대비 어닐링에 사용할 비율(기본 30%)
+        """
+        ratio = min(1.0, max(0.0, epoch / max(1, int(total_epoch * warm_ratio))))
+        val = base + (max_win - base) * ratio
+        self.max_offset.fill_(val)
+
+    # ------------------------------
+    # Forward
+    # ------------------------------
+    def forward(
+        self,
+        x: torch.Tensor,         # (B,N,D)
+        prev_x: torch.Tensor,    # (B,N,D)
+        *,
+        amp_safe: bool = False,  # True면 ref/Δ/weights 계산을 fp32 강제 (AMP 안전)
+        return_more: bool = False,
+        return_index_offsets: bool = False,  # True면 index-space Δ 반환, False면 normalized Δ 반환
+    ):
+        x = x + self.time_embed[1]
+        prev_x = prev_x + self.time_embed[0]    
         B, N, D = x.shape
-        H, P = self.heads, self.num_points
-        device = x.device
+        H, Dh, P = self.heads, self.dim_head, self.num_points
 
-        # ===== Query =====
-        q_input = torch.cat([x, prev_x], dim=-1)  # (B, N, 2D)
-        q_input = self.norm_q(q_input)            # (B, N, 2D)
-        q = self.to_q(q_input).transpose(1, 2)  # (B, inner_dim, N)
+        # ----- 쿼리 입력 정규화 -----
+        q_in = torch.cat([prev_x, x], dim=-1)   # (B,N,2D)
+        q_in = self.norm_q_in(q_in)
 
-        # ===== Offset + Attention weights =====
-        # offset / attn weight 예측
-        offsets = self.offset_predictor(q)                                                      # (B, H*P, N)
-        offsets = rearrange(offsets, 'b (h p) n -> b h p n', h=self.heads, p=self.num_points)   # (B, H, P, N)
+        # ----- 메모리 구성 & 정규화 (길이 2N) -----
+        memory = torch.cat([prev_x, x], dim=1)  # (B,2N,D)
+        mem = self.norm_mem(memory)
 
-        attn_weights = self.attn_weight_predictor(q)                                                        # (B, H*P, N)
-        attn_weights = rearrange(attn_weights, 'b (h p) n -> b h p n', h=self.heads, p=self.num_points)     # (B, H, P, N)
-        attn_weights = attn_weights.softmax(dim=2)                                                          # (B, H, P, N) || softmax를 통해 attention weight를 구함
+        # 프로젝션
+        q = self.to_q(q_in)                     # (B,N,H*Dh)
+        v_mem = self.to_v(mem)                  # (B,2N,H*Dh)
 
-        # ===== KV =====
-        kv_input = torch.cat([x, prev_x], dim=0)                # (2B, N, D)
-        kv_input_k = self.norm_k(kv_input)                       # (2B, N, D)
-        kv_input_v = self.norm_v(kv_input)                       # (2B, N, D)
-        k = self.to_k(kv_input_k)
-        v = self.to_v(kv_input_v)
-        # k, v = kv.chunk(2, dim=-1)                              # (2B, N, inner_dim) 
-        
-        k = k.view(2, B, N, H, -1).permute(1, 3, 4, 0, 2).reshape(B, H, -1, 2 * N)  # (2B,N,inner_dim) -> (2,B,N,H,Dim_head) -> (B,H,Dim_head,2,N) -> (B,H,Dim_head,2N)
-        v = v.view(2, B, N, H, -1).permute(1, 3, 4, 0, 2).reshape(B, H, -1, 2 * N)  # (2B,N,inner_dim) -> (2,B,N,H,Dim_head) -> (B,H,Dim_head,2,N) -> (B,H,Dim_head,2N)
+        # reshape
+        q = rearrange(q, 'b n (h d) -> b n h d', h=H)          # (B,N,H,Dh)
+        v_mem = rearrange(v_mem, 'b l (h d) -> b h l d', h=H)  # (B,H,Lm,Dh)
+        Lm = v_mem.shape[2]
 
-        # ===== Sampling position =====
-        pos = torch.arange(N, device=device).view(1, 1, 1, N).expand(B, H, P, -1)  # (N,) -> (1,1,1,N) -> (B,H,P,N)
-        sample_pos = pos + offsets  # (B, H, P, N)
-        sample_pos = sample_pos.clamp(0, 2 * N - 1)
-
-        # ===== Gather function =====
-        def gather_feat(feat, pos):
-            """
-            feat: (B, H, D, L)
-            pos:  (B, H, P, Nq)
-            Returns:
-                out: (B, H, D, Nq, P)
-            """
-            B, H, D, L = feat.shape
-            _, _, P, Nq = pos.shape
-
-            pos = pos.permute(0, 1, 3, 2).contiguous().long()  # (B, H, Nq, P)
-            feat = feat.permute(0, 1, 3, 2).contiguous()       # (B, H, L, D)
-
-            # flatten B and H to simplify gather
-            feat = feat.view(B * H, L, D)                      # (B*H, L, D)
-            pos = pos.view(B * H, Nq, P)                       # (B*H, Nq, P)
-
-            index = pos.unsqueeze(-1).expand(-1, -1, -1, D)     # (B*H, Nq, P, D)
-            feat = feat.unsqueeze(1).expand(-1, Nq, -1, -1)     # (B*H, Nq, L, D)
-
-            gathered = torch.gather(feat, 2, index)            # (B*H, Nq, P, D)
-            gathered = gathered.permute(0, 3, 1, 2).contiguous().view(B, H, D, Nq, P)
-
-            return gathered  # (B, H, D, Nq, P)
-
-        k_sampled = gather_feat(k, sample_pos)  # (B, H, D, N, P) || pos에 따라 key/value를 샘플링
-        v_sampled = gather_feat(v, sample_pos)  # (B, H, D, N, P)
-
-        # ===== Attention =====
-        q = q.view(B, H, -1, N).transpose(2, 3) * self.scale  # (B, H, N, Dh)
-
-        # Deformable DETR에서는 attn_weight만 softmax로 쓰기도 함
-        if use_learned_weights:
-            attn = attn_weights.permute(0, 1, 3, 2).unsqueeze(-1)  # (B, H, N, P, 1)
+        # ----- 쿼리에서 ref/Δ/weights 예측 -----
+        q_flat = rearrange(q, 'b n h d -> b n (h d)')
+        if amp_safe:
+            # AMP일 때 언더플로 방지
+            with torch.cuda.amp.autocast(enabled=False):
+                ref = torch.sigmoid(self.ref_proj(q_flat.float()))            # (B,N,H)
+                delta_raw = self.delta_proj(q_flat.float())                   # (B,N,H*P)
+                weights_logits = self.weight_proj(q_flat.float())             # (B,N,H*P)
         else:
-            sim = (q.unsqueeze(-1) * k_sampled.permute(0, 1, 3, 2, 4)).sum(-2)
-            attn = sim.softmax(dim=-1).unsqueeze(-1)  # (B, H, N, P, 1)
-        # v = v_sampled.permute(0, 1, 3, 4, 2)                  # (B, H, N, P, D)
-        # out = (attn * v).sum(dim=3)
-        
-        v = v_sampled.permute(0, 1, 3, 4, 2)  # (B, H, N, P, D)
-        out = (attn * v).sum(dim=3)                           # (B, H, N, D)
+            ref = torch.sigmoid(self.ref_proj(q_flat))
+            delta_raw = self.delta_proj(q_flat)
+            weights_logits = self.weight_proj(q_flat)
 
-        out = out.permute(0, 1, 3, 2).reshape(B, -1, N)       # (B, inner_dim, N)
-        out = self.to_out(out).transpose(1, 2)                # (B, N, D)
-        return out, offsets
+        delta = rearrange(delta_raw, 'b n (h p) -> b n h p', h=H, p=P)
+        attn  = rearrange(weights_logits, 'b n (h p) -> b n h p', h=H, p=P)
+        attn  = torch.softmax(attn, dim=-1)
+        attn  = self.attn_dropout(attn)
+
+        # ref를 index-space로 매핑하고, Δ는 tanh로 창 제한
+        ref_idx = ref * (Lm - 1)                              # (B,N,H)
+        delta_win = self.base_offsets + (torch.tanh(delta) * self.max_offset)       # (B,N,H,P) in index-space (±max_offset)
+        # ----- 1D 샘플링 직전: 경계/NaN 가드 -----
+        pos = ref_idx.unsqueeze(-1) + delta_win               # (B,N,H,P)
+
+        # NaN/Inf 안전화
+        pos = torch.nan_to_num(pos, nan=0.0, posinf=(Lm-1.0), neginf=0.0)
+
+        # 유효 마스크 (clamp 전에 원래 유효 위치)
+        valid = (pos >= 0.0) & (pos <= (Lm - 1.0))            # (B,N,H,P)
+        if not valid.all():
+            # 유효한 포인트만 쓰도록 attention 마스킹
+            attn = attn * valid.float()                       # (B,N,H,P)
+            # 모두 0이 되는 행을 방지: 작은 epsilon 더해 재정규화
+            attn = attn / (attn.sum(dim=-1, keepdim=True) + 1e-6)
+
+        # 최종적으로 pos는 gather-safe 범위로 clamp
+        pos = pos.clamp(0.0, Lm - 1.0)
+
+        # ----- 1D 샘플링 -----
+        sampled_v = self.linear_sample_1d(v_mem, pos)         # (B,N,H,P,Dh)
+
+        # ----- 포인트 가중합 -----
+        out = (attn.unsqueeze(-1) * sampled_v).sum(dim=3)     # (B,N,H,Dh)
+        out = rearrange(out, 'b n h d -> b n (h d)')          # (B,N,H*Dh)
+        out = self.proj_out(out)                              # (B,N,D)
+
+        # ----- 잔차 -----
+        out = self.drop_path(out) + x                         # (B,N,D)
+
+        # 반환 오프셋 (기본: normalized)
+        offsets_norm = delta_win / max(1.0, (Lm - 1))         # (B,N,H,P) normalized
+        offsets_ret = delta_win if return_index_offsets else offsets_norm
+
+        if return_more:
+            stats = dict(
+                ref_mean=float(ref.mean().detach().item()),
+                ref_std=float(ref.std().detach().item()),
+                delta_abs_mean=float(delta_win.abs().mean().detach().item()),
+                delta_abs_max=float(delta_win.abs().max().detach().item()),
+                pos_valid_ratio=float(((pos >= 0.0) & (pos <= (Lm - 1))).float().mean().detach().item()),
+                attn_entropy=float((- (attn.clamp_min(1e-12) * attn.clamp_min(1e-12).log()).sum(-1).mean()).detach().item()),
+                Lm=int(Lm),
+                max_offset=float(self.max_offset.detach().item()),
+            )
+            return out, offsets_ret, stats
+
+        return out, offsets_ret
+
     
 class TSABlock(nn.Module):
     def __init__(self, deformable_block : DeformableAttention1D, feedforward_block : FeedforwardBlock, dropout : float, normalized_shape ):
@@ -1221,80 +1479,88 @@ class TSA_Loop(nn.Module):
             x, offsets = layer(x, prev_x)
             offsets_list.append(offsets)
         return x, offsets_list
-    
+
+def init_prior_bias(conv: nn.Conv2d, fg_prob=0.02, bg_idx=0, fg_idx=1, per_class_prior=None):
+    """
+    conv: 최종 seg head (logits). binary면 out_channels=2, multiclass면 out_channels=C.
+    fg_prob: binary일 때 양성 사전확률.
+    per_class_prior: multiclass일 때 [p0, p1, ..., pC-1]. 합=1 권장. None이면 균등.
+    """
+    with torch.no_grad():
+        # 가중치는 일반적인 초기화(예: Kaiming) 후 bias만 손봐도 충분
+        if isinstance(conv, nn.Conv2d) and conv.bias is None:
+            conv.bias = nn.Parameter(torch.zeros(conv.out_channels, dtype=conv.weight.dtype, device=conv.weight.device))
+
+        if conv.out_channels == 2 and per_class_prior is None:
+            # Binary: bg, fg 두 채널의 bias를 logit(prior)로
+            p_bg = max(1e-6, 1.0 - fg_prob)
+            p_fg = max(1e-6, fg_prob)
+            b_bg = math.log(p_bg / (1 - p_bg))
+            b_fg = math.log(p_fg / (1 - p_fg))
+            conv.bias.zero_()
+            conv.bias[bg_idx] = b_bg
+            conv.bias[fg_idx] = b_fg
+        else:
+            # Multiclass: softmax 전 logits에 각 class prior의 log를 넣어줌
+            if per_class_prior is None:
+                per_class_prior = [1.0 / conv.out_channels] * conv.out_channels
+            assert len(per_class_prior) == conv.out_channels
+            priors = torch.tensor(per_class_prior, dtype=conv.bias.dtype, device=conv.bias.device).clamp_(1e-6, 1-1e-6)
+            conv.bias.copy_(torch.log(priors))
+
 class BevSegHead(nn.Module):
-    def __init__(self, target, input_dim, dynamic_output_class=None, static_output_class=None):
-        super(BevSegHead, self).__init__()
+    def __init__(self, target, input_dim, dynamic_output_class=None, static_output_class=None, fg_prior=0.01):
+        super().__init__()
         self.target = target
+        self.fg_prior = fg_prior
+
         if self.target == 'dynamic':
             assert dynamic_output_class is not None
-            self.dynamic_head = nn.Conv2d(input_dim,
-                                          dynamic_output_class,
-                                          kernel_size=3,
-                                          padding=1)
+            # 최종층: activation 없음 (logits)
+            self.dynamic_head = nn.Conv2d(input_dim, dynamic_output_class, kernel_size=3, padding=1)
 
         elif self.target == 'static':
             assert static_output_class is not None
-            self.static_head = nn.Conv2d(input_dim,
-                                         static_output_class,
-                                         kernel_size=3,
-                                         padding=1)
+            self.static_head = nn.Conv2d(input_dim, static_output_class, kernel_size=3, padding=1)
 
         else:  # both
             assert dynamic_output_class is not None and static_output_class is not None
-            self.dynamic_head = nn.Sequential(nn.Conv2d(input_dim,
-                                          dynamic_output_class,
-                                          kernel_size=3,
-                                          padding=1),
-                                        #   nn.GroupNorm(1,dynamic_output_class,eps=1e-3),
-                                          nn.ReLU(inplace=True))  # 또는 nn.SiLU() 등)     ## Conv2d 출력의 mean,var을 일정하게 만들어 안정적 스케일을 맞춰줌, GroupNorm(1[Conv2d output channel을 1개의 그룹으로 본다], 2)
-                                          
-            self.static_head = nn.Sequential(
-                nn.Conv2d(input_dim,
-                        static_output_class,
-                        kernel_size=3,
-                        padding=1),
-                        # nn.GroupNorm(1,static_output_class,eps=1e-3),
-                        nn.ReLU(inplace=True)  # 또는 nn.SiLU() 등
-            )
-            self.dynamic_head = self.dynamic_head.float()
-            self.static_head = self.static_head.float()
+            # 필요하면 3x3 -> (GN/SiLU) -> 1x1 구조로 확장 가능. 최종층은 반드시 activation 없음.
+            self.dynamic_head = nn.Conv2d(input_dim, dynamic_output_class, kernel_size=3, padding=1)
+            self.static_head  = nn.Conv2d(input_dim, static_output_class,  kernel_size=3, padding=1)
 
-    def forward(self,  x, b, l):
+        # 2-class(binary)일 때 prior bias 적용 (bg=0, fg=1 가정)
+        if self.target in ['dynamic', 'both'] and dynamic_output_class == 2:
+            init_prior_bias(self.dynamic_head, fg_prob=self.fg_prior, bg_idx=0, fg_idx=1)
+        if self.target in ['static', 'both'] and static_output_class == 2:
+            init_prior_bias(self.static_head, fg_prob=self.fg_prior, bg_idx=0, fg_idx=1)
+
+    def forward(self, x, b, l):
+        # AMP 친화: autocast는 외부에서 켠 상태를 따름. NaN 방지만 수행.
+        x = torch.nan_to_num(x, nan=0.0, posinf=1e3, neginf=-1e3)
+
         if self.target == 'dynamic':
-            dynamic_map = self.dynamic_head(x)
-            dynamic_map = rearrange(dynamic_map, '(b l) c h w -> b l c h w',
-                                    b=b, l=l)
-            static_map = torch.zeros_like(dynamic_map,
-                                          device=dynamic_map.device)
+            dynamic_map = self.dynamic_head(x)                       # (B*L, Cd, H, W), logits
+            dynamic_map = rearrange(dynamic_map, '(b l) c h w -> b l c h w', b=b, l=l)
+            static_map  = torch.zeros_like(dynamic_map, device=dynamic_map.device)
 
         elif self.target == 'static':
-            static_map = self.static_head(x)
-            static_map = rearrange(static_map, '(b l) c h w -> b l c h w',
-                                   b=b, l=l)
-            dynamic_map = torch.zeros_like(static_map,
-                                           device=static_map.device)
+            static_map  = self.static_head(x)                        # (B*L, Cs, H, W), logits
+            static_map  = rearrange(static_map, '(b l) c h w -> b l c h w', b=b, l=l)
+            dynamic_map = torch.zeros_like(static_map, device=static_map.device)
 
         else:
-            with torch.cuda.amp.autocast(enabled=False):        ## float32로 강제
-                x = x.float()
-                x = torch.nan_to_num(x, nan=0.0, posinf=1e3, neginf=-1e3)
-                dynamic_map = self.dynamic_head(x)
-                dynamic_map = torch.nan_to_num(dynamic_map, nan=0.0, posinf=1e3, neginf=-1e3)
-                assert torch.isfinite(dynamic_map).all(), f"NaN in dynamic_map!"
-                dynamic_map = rearrange(dynamic_map, '(b l) c h w -> b l c h w',
-                                        b=b, l=l)
-    
-                static_map = self.static_head(x)
-                static_map = torch.nan_to_num(static_map, nan=0.0, posinf=1e3, neginf=-1e3)
-                assert torch.isfinite(static_map).all(), f"NaN in static_map!"
-                static_map = rearrange(static_map, '(b l) c h w -> b l c h w',
-                                    b=b, l=l)
+            dynamic_map = self.dynamic_head(x)
+            dynamic_map = rearrange(dynamic_map, '(b l) c h w -> b l c h w', b=b, l=l)
+            static_map  = self.static_head(x)
+            static_map  = rearrange(static_map,  '(b l) c h w -> b l c h w', b=b, l=l)
 
-        output_dict = {'static_seg': static_map,
-                       'dynamic_seg': dynamic_map}
+        # 안전 체크(디버그 시만 활성화)
+        # assert torch.isfinite(dynamic_map).all(), "NaN/Inf in dynamic_map"
+        # assert torch.isfinite(static_map).all(),  "NaN/Inf in static_map"
 
-        return output_dict
+        return {'static_seg': static_map, 'dynamic_seg': dynamic_map}
+
 
 class Mini_cooper(nn.Module):
     def __init__(self,
@@ -1302,7 +1568,7 @@ class Mini_cooper(nn.Module):
                  grid_conf : dict,
                  pseudo_patching : PatchEmbed,
                  tsa_loop : TSA_Loop,
-                 positional_encoding : PositionalEncodeing,
+                 positional_encoding : PositionalEncoding,
                  pseudo_decoding : PatchDecoder,
                  seg_head = BevSegHead,):
         super().__init__()
@@ -1322,12 +1588,12 @@ class Mini_cooper(nn.Module):
     ############################################################################################
     def encoding(self, images, intrins, extrins, positions, is_train=True):
         encoded_bev, vis_encoded_bev = Encoding(images, intrins, extrins, self.data_aug_conf, self.grid_conf, is_train)
-        # print("ENCODED BEV SHAPE OF MULTI_AGENTS", encoded_bev.shape)     ## (max_padded_cavs(5), 1, 64, 200, 200)
+        # print("ENCODED BEV SHAPE OF MULTI_AGENTS", encoded_bev.shape)   ## torch.Size([2, 1, emb_dim, 200, 200]) 
         ##          64 channel Case (For Training)
         mapped_bev= get_large_bev(self.data_aug_conf, encoded_bev,vis_encoded_bev, positions, save_vis = False)
 
         assert torch.isfinite(mapped_bev).all(), "[NaN] mapped_bev after encoding!"
-        # print("LARGE BEV:::: ", mapped_bev, mapped_bev.shape)     ##  torch.Size([1, 64, 400, 400]) [B, Channel, H, W]
+        # print("LARGE BEV:::: ", mapped_bev.shape)     ##  torch.Size([1, emb_dim, 400, 400]) [B, Channel, H, W]
         return mapped_bev    ## true_poas (x,y,yaw) 3차원으로 나옴
     
     ############################################################################################
@@ -1336,19 +1602,18 @@ class Mini_cooper(nn.Module):
         bev_query shape : torch.Size([1, 64, 400, 400])
         """
         # bev_query = bev_query.unsqueeze(0)
-        bev_query = self.pseudo_patching(bev_query)
+        bev_query,H,W = self.pseudo_patching(bev_query) # bev_query shape : torch.Size([1, 2500, emb_dim])
         # prev_bev = prev_bev.unsqueeze(0)
-        prev_bev = self.pseudo_patching(prev_bev)
-
-        bev_query = self.positional_encoding(bev_query) 
+        prev_bev,H,W = self.pseudo_patching(prev_bev)
+        
+        bev_query = self.positional_encoding(bev_query,H,W) 
         if bool_prev_pos_encoded:
             pass
             # print("prev bev is already positional encoded")
         else:
-            prev_bev = self.positional_encoding(prev_bev)
+            prev_bev = self.positional_encoding(prev_bev,H,W)
             # print("prev bev is positional encoded")
 
-        ## bev_query shape : torch.Size([1, 2500, 64])
         result, offsets_list = self.tsa_loop(bev_query,prev_bev)
         assert torch.isfinite(result).all(), "[NaN] tsa_loop output!"
         return result, offsets_list
@@ -1372,7 +1637,7 @@ class Mini_cooper(nn.Module):
         loop_output, offsets_list = self.loop_output(current_bev, prev_bev, bool_prev_pos_encoded)
         # print("loop_output mean/std:", loop_output.mean().item(), loop_output.std().item())
         assert torch.isfinite(loop_output).all(), "[NaN] loop_output after tsa_loop!"
-        # print(f'Loop Output shape : {loop_output.shape}')
+        # print(f'Loop Output shape : {loop_output.shape}')             ## Loop Output shape : torch.Size([1, 2500, 48]
         model_output = self.postprocessing_after_model(loop_output)
         # print("pseudo_decoding output mean/std:", model_output.mean().item(), model_output.std().item())
 
@@ -1380,7 +1645,7 @@ class Mini_cooper(nn.Module):
         model_output = torch.clamp(model_output,-10,10) ## NaN 방지
         assert torch.isfinite(model_output).all(), "[NaN] before seg_head!"
 
-        # print(f'After PostProcessing from loop output : {model_output.shape}')  ## shape : torch.Size([1, 64, 400, 400])
+        # print(f'After PostProcessing from loop output : {model_output.shape}')  ## shape : torch.Size([1, emb_dim, H, W])
         seg_loss_dict = self.seg_head(model_output)
         # with torch.no_grad():
         #     print("dynamic_seg:", seg_loss_dict["dynamic_seg"].mean().item(), seg_loss_dict["dynamic_seg"].std().item())
@@ -1467,10 +1732,10 @@ def ysmodel(
     dynamic_output_class = config['dynamic_output_class']
     static_output_class = config['static_output_class']
     
-    positional_embed = PositionalEncodeing(bev_emb_dim,(large_bev_size//patch_size)**2,dropout,device)
-    pseudo_patching = PatchEmbed(img_size=large_bev_size, patch_size=patch_size, in_channels=bev_emb_dim, embed_dim=bev_emb_dim).to(device=device)
+    positional_embed = PositionalEncoding(bev_emb_dim)
+    pseudo_patching = PatchEmbed(img_size=large_bev_size, patch_size=patch_size,stride=patch_size//2, in_channels=bev_emb_dim, embed_dim=bev_emb_dim).to(device=device)
     # pseudo_decoding = PatchDecoder(embed_dim=bev_emb_dim, out_channels=bev_emb_dim, patch_size=patch_size, bev_size=large_bev_size).to(device=device)
-    pseudo_decoding = PatchDecoder(emb_dim=bev_emb_dim).to(device=device)
+    pseudo_decoding = PatchDecoder(emb_dim=bev_emb_dim, out_hw=(data_aug_conf['H'],data_aug_conf['W'])).to(device=device)
 
     model = []
     for _ in range(N):

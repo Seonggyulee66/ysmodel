@@ -10,30 +10,30 @@ from einops.layers.torch import Rearrange
 import torch.nn.functional as F
 import torch.nn as nn 
 
-class PositionalEncodeing(nn.Module):
-    def __init__(self, d_model : int, seq_len : int, dropout : float,device='cpu') -> None:
-        super().__init__()
-        self.d_model = d_model
-        self.seq_len = seq_len
-        self.dropout = nn.Dropout(dropout)
+# class PositionalEncodeing(nn.Module):
+#     def __init__(self, d_model : int, seq_len : int, dropout : float,device='cpu') -> None:
+#         super().__init__()
+#         self.d_model = d_model
+#         self.seq_len = seq_len
+#         self.dropout = nn.Dropout(dropout)
 
-        pe = torch.zeros(seq_len,d_model,device=device)   # positional encoding tensor 생성
-        position = torch.arange(0,seq_len, dtype=torch.float,device=device).unsqueeze(1) ## shape : [seq_len, 1]
-        _2i = torch.arange(0,d_model,2,dtype= torch.float,device=device)   ## 여기서 i는 Embedding 벡터의 차원 인덱스를 의미 2i는 짝수 인덱스
+#         pe = torch.zeros(seq_len,d_model,device=device)   # positional encoding tensor 생성
+#         position = torch.arange(0,seq_len, dtype=torch.float,device=device).unsqueeze(1) ## shape : [seq_len, 1]
+#         _2i = torch.arange(0,d_model,2,dtype= torch.float,device=device)   ## 여기서 i는 Embedding 벡터의 차원 인덱스를 의미 2i는 짝수 인덱스
 
-        ## 0::2 => index 0부터 2 step씩 가겠다.
-        pe[:,0::2] = torch.sin(position/10000**(_2i/d_model))   ## 모든 sequence에서 짝수열의 값은 sin함수 사용 
-        pe[:,1::2] = torch.cos(position/10000**(_2i/d_model))   ## 모든 sequence에서 짝수열의 값은 cos함수 사용 
+#         ## 0::2 => index 0부터 2 step씩 가겠다.
+#         pe[:,0::2] = torch.sin(position/10000**(_2i/d_model))   ## 모든 sequence에서 짝수열의 값은 sin함수 사용 
+#         pe[:,1::2] = torch.cos(position/10000**(_2i/d_model))   ## 모든 sequence에서 짝수열의 값은 cos함수 사용 
 
-        pe = pe.unsqueeze(0)    ## 차원 추가 => shape : [1, seq_len, d_model]
-        ## register_buffer
-        ## 모듈내에서 pe이름으로 접근가능, 학습은 되지 않음, model이 다른 device로 갈때 같이 감
-        self.register_buffer('pe',pe)
+#         pe = pe.unsqueeze(0)    ## 차원 추가 => shape : [1, seq_len, d_model]
+#         ## register_buffer
+#         ## 모듈내에서 pe이름으로 접근가능, 학습은 되지 않음, model이 다른 device로 갈때 같이 감
+#         self.register_buffer('pe',pe)
 
-    def forward(self, x):
-        # print('Positional Encoding finished')
-        x = x + self.pe[:,:x.shape[1],:].requires_grad_(False)
-        return self.dropout(x)
+#     def forward(self, x):
+#         # print('Positional Encoding finished')
+#         x = x + self.pe[:,:x.shape[1],:].requires_grad_(False)
+#         return self.dropout(x)
 
 def get_json(path):
     with open(path, 'r') as f:

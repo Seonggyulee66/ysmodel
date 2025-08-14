@@ -395,7 +395,7 @@ def to_device(inputs, device):
 #             index = cum_sum_len[i]
 #         # (M, H, W, 3)
 #         raw_images = \
-#             batch_dict['ego']['inputs'].detach().cpu().data.numpy()[index, 0]       ## shape (4, 512, 512, 3)
+#             batch_dict['ego']['inputs'].detach().cpu().data.numpy()[index, 0]       ## shape (4, label_size, label_size, 3)
 #         visualize_summary = np.zeros((raw_images[0].shape[0] * 2,
 #                                       raw_images[0].shape[1] * 4,
 #                                       3),
@@ -449,11 +449,12 @@ def save_bev_seg_binary(output_dict,
                         chunk_id,
                         batch_iter,
                         epoch,
+                        label_size,
                         test=False):
     """
     Save the BEV segmentation results during training, including all agents' camera inputs.
-    output_dict -> post_process된 model output [torch.Size([1, 512, 512])]
-    batch_dict -> batch_dict['ego'][~~] 로 정리된 dictionary [ex) ['inputs'] -> torch.Size([1, 5, 1, 4, 512, 512, 3])]
+    output_dict -> post_process된 model output [torch.Size([1, label_size, label_size])]
+    batch_dict -> batch_dict['ego'][~~] 로 정리된 dictionary [ex) ['inputs'] -> torch.Size([1, 5, 1, 4, label_size, 512, 3])]
     """
 
     if test:
@@ -487,25 +488,25 @@ def save_bev_seg_binary(output_dict,
                 torch_tensor_to_numpy(batch_dict['ego']['record_len'])))
             index = cum_sum_len[i]
 
-        canvas_w = 512 * num_cameras  # 각 카메라당 512 픽셀 너비
+        canvas_w = label_size * num_cameras  # 각 카메라당 label_size 픽셀 너비
         bev_height = 256              # BEV row 높이
-        camera_height = 512 * num_agents
-        dynmap_height = 512
+        camera_height = label_size * num_agents
+        dynmap_height = label_size
         canvas_h_total = camera_height + bev_height + dynmap_height
         visualize_summary = np.zeros((canvas_h_total, canvas_w, 3), dtype=np.uint8)
 
         # 1~3행: Camera views (Agent 순서대로 위에서부터 나열)
         for agent_id in range(num_agents):
-            raw_images = batch_dict['ego']['inputs'][0, agent_id, i]  # shape: (4, 512, 512, 3)
+            raw_images = batch_dict['ego']['inputs'][0, agent_id, i]  # shape: (4, label_size, label_size, 3)
             for cam_id in range(num_cameras):
                 raw_image = raw_images[cam_id].detach().cpu().numpy()
                 raw_image = 255 * ((raw_image * STD) + MEAN)
                 raw_image = np.array(raw_image, dtype=np.uint8)
                 raw_image = cv2.cvtColor(raw_image, cv2.COLOR_BGR2RGB)
 
-                y_start = agent_id * 512
-                x_start = cam_id * 512
-                visualize_summary[y_start:y_start + 512, x_start:x_start + 512, :] = raw_image
+                y_start = agent_id * label_size
+                x_start = cam_id * label_size
+                visualize_summary[y_start:y_start + label_size, x_start:x_start + label_size, :] = raw_image
 
         # 4행: BEV maps (각 agent의 BEV → 하나의 행에 가로 분할 배치)
         bev_row = np.zeros((bev_height, canvas_w, 3), dtype=np.uint8)
