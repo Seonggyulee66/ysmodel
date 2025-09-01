@@ -21,70 +21,136 @@ import torch
 import torch.nn.functional as F
 import time
 
+# === 프로파일 유틸 ===
+import time
+import statistics
+
+class GPUTimer:
+    """CUDA 구간 측정용. with 블록으로 사용."""
+    def __init__(self, enable=True):
+        self.enable = enable and torch.cuda.is_available()
+        if self.enable:
+            self.start = torch.cuda.Event(enable_timing=True)
+            self.end = torch.cuda.Event(enable_timing=True)
+        self.ms = 0.0
+
+    def __enter__(self):
+        if self.enable:
+            torch.cuda.synchronize()
+            self.start.record()
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        if self.enable:
+            self.end.record()
+            torch.cuda.synchronize()
+            self.ms = self.start.elapsed_time(self.end)  # milliseconds
+
+class CPUTimer:
+    """CPU 구간 측정용. with 블록으로 사용."""
+    def __enter__(self):
+        self.t0 = time.perf_counter()
+        return self
+    def __exit__(self, exc_type, exc, tb):
+        self.ms = (time.perf_counter() - self.t0) * 1000.0
+
+class TickProfiler:
+    """tick 단위 측정치 누적 + 통계."""
+    KEYS = ["data", "h2d", "encode", "forward", "loss", "backward", "optim", "step_total"]
+
+    def __init__(self):
+        self.hist = {k: [] for k in self.KEYS}
+        self._last_data_t0 = None  # data time 측정을 위한 구간 시작 지점
+
+    def mark_data_start(self):
+        # 다음 tick의 "data" 구간 시작
+        self._last_data_t0 = time.perf_counter()
+
+    def add_ms(self, key, ms):
+        self.hist[key].append(float(ms))
+
+    def summary(self):
+        def stats(x):
+            return dict(
+                mean=statistics.mean(x) if x else 0.0,
+                p50=statistics.median(x) if x else 0.0,
+                max=max(x) if x else 0.0,
+                n=len(x),
+            )
+        return {k: stats(v) for k, v in self.hist.items()}
+
+    def pretty(self):
+        s = []
+        summ = self.summary()
+        for k in self.KEYS:
+            st = summ[k]
+            s.append(f"{k:>9s}: mean {st['mean']:7.2f} ms | p50 {st['p50']:7.2f} | max {st['max']:7.2f} | n={st['n']}")
+        return "\n".join(s)
+
+
 def unwrap_module(m):
     # DDP/DP 래핑이면 .module, 아니면 자기 자신
     return m.module if hasattr(m, "module") else m
 
 @torch.no_grad()
-def quick_monitor_v2(logits, target, th=0.3, ignore_index=255):
-    # (B,L,...) → (B*L,...)
-    if logits.dim() == 5:
+def quick_monitor_v2(logits, target, th=0.3):
+    """
+    logits: (B,C,H,W) or (B,L,C,H,W)  where C==2 (bg,fg) or C==1 (fg-logit)
+    target: (B,H,W) or (B,1,H,W) or (B,L,H,W)
+    """
+    # 1) (B,L,...) 이면 평탄화
+    if logits.dim() == 5:  # (B,L,C,H,W)
         B, L, C, H, W = logits.shape
-        logits = logits.reshape(B*L, C, H, W)
-        if target.dim() == 4 and target.size(1) == L:
-            target = target.reshape(B*L, H, W)
-        elif target.dim() == 5 and target.size(2) == 1:
-            target = target.reshape(B*L, 1, H, W)
+        logits = logits.reshape(B * L, C, H, W)
+        if target.dim() == 4 and target.size(1) == L:  # (B,L,H,W)
+            target = target.reshape(B * L, H, W)
+        elif target.dim() == 5 and target.size(2) == 1:  # (B,L,1,H,W)
+            target = target.reshape(B * L, 1, H, W)
 
-    # 확률
-    prob_fg = torch.sigmoid(logits[:,0]) if logits.size(1)==1 else torch.softmax(logits,1)[:,1]
+    # 2) 확률 계산
+    if logits.size(1) == 1:
+        prob_fg = torch.sigmoid(logits[:, 0])            # (B*,H,W)
+    else:
+        prob = torch.softmax(logits, dim=1)              # (B*,2,H,W)
+        prob_fg = prob[:, 1]                             # fg 확률
 
-    # 타깃 + 유효마스크
-    if target.dim() == 4 and target.size(1) == 1: target = target[:,0]
-    target = target.long()
-    valid  = (target != ignore_index)
-    if valid.sum() == 0:
-        return dict(P=0.0, R=0.0, PPR=0.0, p_mean=float(prob_fg.mean()), y_prev=0.0, tp=0, fp=0, fn=0)
+    # 3) 타깃 정리
+    if target.dim() == 4 and target.size(1) == 1:  # (B*,1,H,W)
+        target = target[:, 0]
+    elif target.dim() == 3:
+        pass
+    else:
+        target = target.squeeze()
 
-    y    = (target==1) & valid
-    pred = (prob_fg>=th) & valid
+    y = (target > 0).bool()
+    pred = (prob_fg >= th)
 
     tp = (pred & y).sum().item()
-    fp = (pred & (~y) & valid).sum().item()
-    fn = ((~pred) & y).sum().item()
-    P  = tp / max(tp+fp, 1)
-    R  = tp / max(tp+fn, 1)
-    return dict(P=P, R=R,
-                PPR=float(pred.sum().item()/valid.sum().item()),
-                p_mean=float(prob_fg[valid].mean()),
-                y_prev=float(y.sum().item()/valid.sum().item()),
-                tp=tp, fp=fp, fn=fn)
+    fp = (pred & ~y).sum().item()
+    fn = (~pred & y).sum().item()
+
+    P = tp / max(tp + fp, 1)
+    R = tp / max(tp + fn, 1)
+    PPR = pred.float().mean().item()      # 임계값 적용 후 양성 비율
+    p_mean = prob_fg.mean().item()        # 임계값 없이 평균 양성확률
+    y_prev = y.float().mean().item()      # 라벨의 실제 양성 비율
+
+    print(f"[th={th:.2f}] P={P:.3f} R={R:.3f} PPR={PPR:.3f} p_mean={p_mean:.3f} y_prev={y_prev:.3f}")
+    return dict(P=P, R=R, PPR=PPR, p_mean=p_mean, y_prev=y_prev, tp=tp, fp=fp, fn=fn)
 
 
 @torch.no_grad()
-def sweep_best_threshold(logits, target, ths=None, ignore_index=255):
-    device = logits.device
+def sweep_best_threshold(logits, target, ths=None):
     if ths is None:
-        th_low  = torch.tensor([0.001,0.002,0.003,0.005,0.0075,0.01,0.0125,0.015,0.02,0.025,0.03,0.04], device=device)
-        th_mid  = torch.linspace(0.05, 0.50, 10, device=device)
-        th_high = torch.linspace(0.55, 0.95,  9, device=device)
-        ths = torch.unique(torch.cat([th_low, th_mid, th_high], dim=0))
-
-    best, bestF1 = None, -1.0
+        ths = torch.linspace(0.05, 0.95, 19, device=logits.device)
+    best, bestF1 = None, -1
     for th in ths:
-        m  = quick_monitor_v2(logits, target, float(th), ignore_index=ignore_index)
-        P, R = float(m.get("P",0.0)), float(m.get("R",0.0))
-        den  = P + R
-        F1   = 0.0 if den <= 1e-9 else (2.0 * P * R) / den
+        m = quick_monitor_v2(logits, target, float(th))
+        F1 = 2*m["P"]*m["R"] / max(m["P"]+m["R"], 1e-6)
         if F1 > bestF1:
             bestF1, best = F1, {"th": float(th), "F1": F1, **m}
-
-    if best is None:
-        best = {"th": 0.01, "F1": 0.0, "P": 0.0, "R": 0.0, "PPR": 0.0}
-
-    print(f"best th={best['th']:.3f} F1={best['F1']:.3f} P={best['P']:.3f} R={best['R']:.3f}")
+    print(f"best th={best['th']:.2f} F1={best['F1']:.3f} P={best['P']:.3f} R={best['R']:.3f}")
     return best
-
 
 
 ## Running command
@@ -216,16 +282,13 @@ def main():
     model_without_ddp = model
     
     if opt.distributed:
-        model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
-        model = torch.nn.parallel.DistributedDataParallel(
-            model,
-            device_ids=[opt.gpu],
-            find_unused_parameters=False,
-            broadcast_buffers=False,
-        )
-        model_without_ddp = model.module   # ✅ 옵티마/셰이퍼 등은 module을 사용
-    else:
-        model_without_ddp = model
+        model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model).to(device)
+        torch.nn.parallel.DistributedDataParallel(model,
+                                                    device_ids=[opt.gpu],
+                                                    find_unused_parameters=False,   # ← 여기만 False로
+                                                    broadcast_buffers=False)        # ← BN을 eval로 고정했으니 버퍼 브로드캐스트도 꺼서 통신 감소(선택)
+                                                    # static_graph=True,)            # ← 그래프/사용 파라미터 구성이 '항상' 동일하면 켜면 추가로 빨라짐(선택))
+    
     
     # define the loss
     criterion = train_utils.create_loss(hypes)
@@ -233,9 +296,9 @@ def main():
     # optimizer setup
     optimizer = train_utils.setup_optimizer(hypes, model_without_ddp)
 
-    # record training
-    writer = SummaryWriter(saved_path)
+   # (중략) main() 내부
 
+    writer = SummaryWriter(saved_path)
     # half precision training
     if opt.half:
         scaler = torch.cuda.amp.GradScaler()
@@ -245,169 +308,76 @@ def main():
     num_steps = len(train_loader)
     n_iter_per_epoch = num_steps * hypes['chunk_size']  # 예: 162 * 5 = 810
     scheduler = train_utils.setup_lr_schedular(hypes, optimizer, n_iter_per_epoch)
-
-    # ## printing the number of parameters layer by layer
-    # for name, param in model.named_parameters():
-    #     if param.requires_grad:
-    #         print(f"{name:<50} | {param.numel():>8} parameters")
-
-    ### pringing the number of parameters in taotal
-    def count_parameters(model):
-        return sum(p.numel() for p in model.parmeters() if p.requires_grad)
-
-    # total_params = count_parameters(model)
-    # print(f"Total Trainable Parameters: {total_params}")
-    
-    # def set_bn_eval(m):
-    #     if isinstance(m, torch.nn.BatchNorm2d):
-    #         m.eval()
-    #         m.track_running_stats = False
-            
-    # model.apply(set_bn_eval)
-    
-    def has_sigmoid_or_softmax(module: torch.nn.Module):
-        names = []
-        for name, m in module.named_modules():
-            if isinstance(m, (torch.nn.Sigmoid, torch.nn.Softmax)):
-                names.append(name)
-        return names
-
-    print('Training start with num steps of %d' % num_steps)    ## EX) gpu 2개 사용시, (22, 22)개씩 나누어서 계산한다 여기서 개수가 맞지 않는데 이것은 1개가 duplicated
-
-    num_scenarios_per_epoch = len(train_loader)  # ex) 43
-
     accum_steps = 3                    # 예: tick 6개마다 1 step
     global_micro = 0
     global_update = 0
     optimizer.zero_grad(set_to_none=True)
     
-    import math, torch.nn as nn
+    # ★ 추가: 프로파일러
+    epoch_prof = None  # 에폭마다 재생성
+    LOG_EVERY = 50     # tick 단위 로그 주기 (원하면 조절)
 
-    def try_set_binary_head_prior(module, fg_prob=0.015):
-        m = unwrap_module(module)
-        # dynamic/static 이름 힌트로 찾아보되, 못 찾으면 마지막 2채널 Conv2d 사용
-        target = None
-        for name, mod in m.named_modules():
-            if isinstance(mod, nn.Conv2d) and mod.out_channels == 2 and ("dynamic" in name.lower()):
-                target = mod
-        if target is None:
-            for name, mod in m.named_modules():
-                if isinstance(mod, nn.Conv2d) and mod.out_channels == 2:
-                    target = mod
-        if target is None:
-            print("[InitPrior] 2-channel head not found. skip.")
-            return
+    # (중략) 스케줄러 준비 직후
+    scheduler.step_update(0)
 
-        with torch.no_grad():
-            if target.bias is None:
-                target.bias = nn.Parameter(torch.zeros(2, device=target.weight.device, dtype=target.weight.dtype))
-            p = max(1e-6, min(1-1e-6, fg_prob))
-            target.bias.zero_()
-            target.bias[0] = math.log((1-p)/p)   # BG
-            target.bias[1] = math.log(p/(1-p))   # FG
-            print("[InitPrior] set bias with fg_prior =", p)
-
-    # 모델/옵티마이저 세팅 뒤, 스크래치 학습일 때만 1회:
-    if init_epoch == 0:
-        try_set_binary_head_prior(model, fg_prob=0.015)
-    
-    scheduler.step_update(0)      ## 
-    
-    ######################################################################################################################
-    ######################################################################################################################
-    ##                              현재 Dataset을 기존 tick단위가 아닌 Scneario 단위로 묶어 각 rank에 ticks 묶음(chunk)을 전달하므로써
-    ##                              prev data를 잘 쓸수 있는 구조로 조정을 한 상태, 또한 tick 단위로 loss backward 상태
-    ##                              
-    ######################################################################################################################
-    ######################################################################################################################
-    # ─────────────────────────────────────────────────────────────────────────────
-# 에폭 밖(루프 시작 전) 권장: 운영 임곗값 초기화
-    try:
-        th_run
-    except NameError:
-        th_run = 0.02  # 초기 운영 임곗값 (prior-matching)
-    best_F1_ema = 0.0
-
-    eval_freq = hypes['train_params'].get('eval_freq', 50)  # YAML에서 가져옴
-    PRINT_DELTA = 1e-3  # F1이 이 이상 개선될 때도 프린트
-    # ─────────────────────────────────────────────────────────────────────────────
+    # (중략) 임계값 초기화 등 이후
 
     for epoch in range(init_epoch, max(epoches, init_epoch)):
-        # --- 에폭별 sweep 수집 버퍼 ---
-        epoch_logits = []
-        epoch_targets = []
+        # ★ 추가: 에폭 프로파일러 새로 시작
+        epoch_prof = TickProfiler()
 
-        for param_group in optimizer.param_groups:
-            print('learning rate %.7f' % param_group["lr"])
+        # (중략) 러닝레이트 출력, sampler epoch 설정 등
 
-        if opt.distributed:
-            sampler_train.set_epoch(epoch)
         if opt.rank == 0:
             pbar2 = tqdm.tqdm(total=len(train_loader), leave=True)
 
+        # ★ 추가: 첫 data 계측 시작 기준점
+        epoch_prof.mark_data_start()
+
         for i, scenario_batch in enumerate(train_loader):
-            core = unwrap_module(model)  # ← 시나리오 루프 시작에 한 번만 두어도 됨
+            core = unwrap_module(model)
             scenario_id_check = scenario_batch['ego']['scenario_id'][0]
             model.train()
 
             prev_encoding_result = None
             record_len = scenario_batch['ego']['record_len']
 
+            # ── tick 루프
             for tick_idx in range(record_len):
-                tick_input_images = scenario_batch['ego']['inputs'][tick_idx].to(device)
-                tick_input_intrins = scenario_batch['ego']['intrinsic'][tick_idx].to(device)
-                tick_input_extrins = scenario_batch['ego']['extrinsic'][tick_idx].to(device)
-                tick_input_locs = scenario_batch['ego']['agent_true_loc'][tick_idx].to(device)
 
-                # Batch=1 가정 → encoding 입력 차원 맞춤
-                tick_input_images = tick_input_images.unsqueeze(1)
-                tick_input_intrins = tick_input_intrins.unsqueeze(1)
-                tick_input_extrins = tick_input_extrins.unsqueeze(1)
-                tick_input_locs = tick_input_locs.unsqueeze(1)
+                # ===== data 구간 =====
+                # data 구간은 "이 tick을 시작하기까지 걸린 시간"으로 간주 (이전 tick의 optim 이후~여기까지)
+                if epoch_prof._last_data_t0 is not None:
+                    data_ms = (time.perf_counter() - epoch_prof._last_data_t0) * 1000.0
+                    epoch_prof.add_ms("data", data_ms)
 
-                # GT dict 구성 (tick 단위)
-                gt_tick = {
-                    'gt_static'  : torch.from_numpy(scenario_batch['ego']['gt_static'][tick_idx]).unsqueeze(1).to(device),
-                    'gt_dynamic' : torch.from_numpy(scenario_batch['ego']['gt_dynamic'][tick_idx]).unsqueeze(1).to(device)
-                }
+                # ===== h2d (CPU→GPU) =====
+                with GPUTimer() as t_h2d:
+                    tick_input_images  = scenario_batch['ego']['inputs'][tick_idx].to(device, non_blocking=True)
+                    tick_input_intrins = scenario_batch['ego']['intrinsic'][tick_idx].to(device, non_blocking=True)
+                    tick_input_extrins = scenario_batch['ego']['extrinsic'][tick_idx].to(device, non_blocking=True)
+                    tick_input_locs    = scenario_batch['ego']['agent_true_loc'][tick_idx].to(device, non_blocking=True)
 
-                if not opt.half:
-                    current_encoding_result = core.encoding(
-                        tick_input_images, tick_input_intrins, tick_input_extrins, tick_input_locs, is_train=True
-                    )
-                    assert torch.isfinite(current_encoding_result).all(), "NaN found in encoding result!"
+                    # Batch=1 가정 → encoding 입력 차원 맞춤
+                    tick_input_images  = tick_input_images.unsqueeze(1)
+                    tick_input_intrins = tick_input_intrins.unsqueeze(1)
+                    tick_input_extrins = tick_input_extrins.unsqueeze(1)
+                    tick_input_locs    = tick_input_locs.unsqueeze(1)
+                epoch_prof.add_ms("h2d", t_h2d.ms)
 
-                    if prev_encoding_result is None:
-                        model_output_dict = model(
-                            current_encoding_result, current_encoding_result, bool_prev_pos_encoded=False
-                        )
-                    else:
-                        model_output_dict = model(
-                            current_encoding_result, prev_encoding_result, bool_prev_pos_encoded=True
-                        )
+                # ===== 전체 tick 시간 측정 시작 =====
+                with CPUTimer() as t_step_total:
 
-                    # ★ 변경: FP32에서도 에폭 버퍼 수집
-                    with torch.no_grad():
-                        logit_tick = model_output_dict['dynamic_seg'].detach()     # (B,L,C,H,W)
-                        B, L, C, H, W = logit_tick.shape
-                        logit_tick = logit_tick.reshape(B*L, C, H, W).float().cpu()
-                        tgt_tick = gt_tick['gt_dynamic']
-                        if tgt_tick.dim() == 5:    # (B,L,1,H,W) → (B,L,H,W)
-                            tgt_tick = tgt_tick[:, :, 0]
-                        tgt_tick = tgt_tick.reshape(B*L, H, W).long().cpu()
-
-                        epoch_logits.append(logit_tick)
-                        epoch_targets.append(tgt_tick)
-
-                    final_loss = criterion(model_output_dict, gt_tick)
-
-                else:
-                    with torch.cuda.amp.autocast():
+                    # ===== encode =====
+                    with GPUTimer() as t_enc:
                         current_encoding_result = core.encoding(
                             tick_input_images, tick_input_intrins, tick_input_extrins, tick_input_locs, is_train=True
                         )
-                        assert torch.isfinite(current_encoding_result).all(), "NaN found in encoding result!"
+                        assert torch.isfinite(current_encoding_result).all(), "NaN in encoding!"
+                    epoch_prof.add_ms("encode", t_enc.ms)
 
+                    # ===== forward =====
+                    with GPUTimer() as t_fwd:
                         if prev_encoding_result is None:
                             model_output_dict = model(
                                 current_encoding_result, current_encoding_result, bool_prev_pos_encoded=False
@@ -416,103 +386,90 @@ def main():
                             model_output_dict = model(
                                 current_encoding_result, prev_encoding_result, bool_prev_pos_encoded=True
                             )
+                    epoch_prof.add_ms("forward", t_fwd.ms)
 
-                        # ★ 변경: AMP에서도 동일하게 에폭 버퍼 수집(프린트 제거)
-                        with torch.no_grad():
-                            logit_tick = model_output_dict['dynamic_seg'].detach()     # (B,L,C,H,W)
-                            B, L, C, H, W = logit_tick.shape
-                            logit_tick = logit_tick.reshape(B*L, C, H, W).float().cpu()
-                            tgt_tick = gt_tick['gt_dynamic']
-                            if tgt_tick.dim() == 5:
-                                tgt_tick = tgt_tick[:, :, 0]
-                            tgt_tick = tgt_tick.reshape(B*L, H, W).long().cpu()
+                    # ===== loss =====
+                    # GT dict 구성 (tick 단위)
+                    gt_tick = {
+                        'gt_static'  : torch.from_numpy(scenario_batch['ego']['gt_static'][tick_idx]).unsqueeze(1).to(device, non_blocking=True),
+                        'gt_dynamic' : torch.from_numpy(scenario_batch['ego']['gt_dynamic'][tick_idx]).unsqueeze(1).to(device, non_blocking=True),
+                    }
 
-                            epoch_logits.append(logit_tick)
-                            epoch_targets.append(tgt_tick)
+                    with GPUTimer() as t_loss:
+                        final_loss = criterion(model_output_dict, gt_tick)
+                    epoch_prof.add_ms("loss", t_loss.ms)
 
-                        final_loss = criterion(model_output_dict,gt_tick)
+                    # ===== backward =====
+                    with GPUTimer() as t_bwd:
+                        if opt.half:
+                            scaler.scale(final_loss).backward()
+                        else:
+                            final_loss.backward()
+                        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                    epoch_prof.add_ms("backward", t_bwd.ms)
 
-                # ★ 변경: per-tick 모니터링(quick_monitor_v2) 프린트 제거
-                # (필요하면 디버그 플래그로 임시 활성화 가능)
+                    # ===== optim (step + zero + scaler.update) =====
+                    with GPUTimer() as t_opt:
+                        if opt.half:
+                            scaler.step(optimizer)
+                            scaler.update()
+                        else:
+                            optimizer.step()
+                        optimizer.zero_grad(set_to_none=True)
+                    epoch_prof.add_ms("optim", t_opt.ms)
 
-                # backward & step
-                if opt.half:
-                    scaler.scale(final_loss).backward()
-                else:
-                    final_loss.backward()
-                    
-                # DDP여도 model.parameters() 써도 OK (wrapper가 넘겨줌)
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                    # 스케줄러/전역 카운터
+                    global_micro += 1
+                    global_update += 1
+                    scheduler.step_update(global_update)
 
-                prev_encoding_result = current_encoding_result.detach()
-                global_micro += 1
+                    prev_encoding_result = current_encoding_result.detach()
 
-                if opt.half:
-                    scaler.step(optimizer); scaler.update()
-                else:
-                    optimizer.step()
-                optimizer.zero_grad(set_to_none=True)
-                
-                global_update += 1
-                scheduler.step_update(global_update)
-                # scheduler.step()
-            
-            print(f"[{i} / {len(train_loader)}]  || Senario {scenario_id_check} for {record_len}th tick Loss : {final_loss:.4f}")
+                # ===== tick total =====
+                epoch_prof.add_ms("step_total", t_step_total.ms)
 
-        if opt.rank == 0:
-            criterion.logging(epoch, i, scenario_id_check, len(train_loader), writer, pbar=pbar2, rank=opt.rank)
-            pbar2.update(1)
-            for lr_idx, param_group in enumerate(optimizer.param_groups):
-                writer.add_scalar(f'lr_{lr_idx}', param_group["lr"], global_micro)
+                # 다음 tick을 위한 data 계측 시작 기준점 설정
+                epoch_prof.mark_data_start()
 
-        # ─────────────────────────────
-        # ★ 변경: 에폭 말에만 스윕/운영 임곗값/요약 지표 프린트
-        with torch.no_grad():
-            if len(epoch_logits) > 0:
-                all_logits  = torch.cat(epoch_logits,  0)  # (N, C, H, W)
-                all_targets = torch.cat(epoch_targets, 0)   # (N, H, W)
-
-                # 1) 현 운영 임곗값(th_run)에서의 지표 (P, R, F1, PPR, p_mean, y_prev)
-                run_metrics = quick_monitor_v2(all_logits, all_targets, th=th_run)
-
-                # 2) 에폭별 최적 임곗값 스윕
-                best = sweep_best_threshold(all_logits, all_targets)  # dict: th, F1, P, R, PPR, p_mean, y_prev ...
-                th_run = 0.7 * th_run + 0.3 * best['th']              # EMA 스무딩
-
-                P = float(run_metrics.get('P', 0.0))
-                R = float(run_metrics.get('R', 0.0))
-                den = P + R
-                F1_run = 0.0 if den <= 0 else (2.0 * P * R) / den
-
-                # 로깅
-                if opt.rank == 0:
-                    writer.add_scalar('th_run', th_run, epoch)
-                    writer.add_scalar('best_th', best['th'], epoch)
-                    writer.add_scalar('F1_run', F1_run, epoch)
-                    writer.add_scalar('P_run', run_metrics['P'], epoch)
-                    writer.add_scalar('R_run', run_metrics['R'], epoch)
-                    writer.add_scalar('PPR_run', run_metrics['PPR'], epoch)
-                    writer.add_scalar('y_prev', run_metrics['y_prev'], epoch)
-                    writer.add_scalar('p_mean_run', run_metrics['p_mean'], epoch)
-
-                    # “reasonable한 때”만 프린트
-                    should_print = (
-                        epoch == init_epoch or
-                        epoch == max(epoches, init_epoch) - 1 or
-                        ((epoch + 1) % eval_freq == 0) or
-                        (best['F1'] > best_F1_ema + PRINT_DELTA)
+                # 간이 로그 (tick마다 찍고 싶으면 LOG_EVERY=1로)
+                if (global_micro % LOG_EVERY == 0) and (opt.rank == 0):
+                    msg = (
+                        f"[E{epoch} T{tick_idx:03d}] "
+                        f"data {data_ms:6.1f} | h2d {t_h2d.ms:6.1f} | enc {t_enc.ms:6.1f} | fwd {t_fwd.ms:6.1f} | "
+                        f"loss {t_loss.ms:6.1f} | bwd {t_bwd.ms:6.1f} | opt {t_opt.ms:6.1f} | step {t_step_total.ms:6.1f}  "
+                        f"|| loss={float(final_loss):.4f}"
                     )
-                    if should_print:
-                        print(
-                            f"[E{epoch}] "
-                            f"th*={th_run:.3f} (best {best['th']:.3f}) | "
-                            f"F1*={F1_run:.3f} P*={run_metrics['P']:.3f} R*={run_metrics['R']:.3f} | "
-                            f"PPR*={run_metrics['PPR']:.3f} p_mean*={run_metrics['p_mean']:.3f} "
-                            f"y_prev={run_metrics['y_prev']:.3f} || "
-                            f"[best] F1={best['F1']:.3f} P={best['P']:.3f} R={best['R']:.3f} PPR={best['PPR']:.3f}"
-                        )
-                    # F1 ema 갱신
-                    best_F1_ema = 0.9 * best_F1_ema + 0.1 * best['F1']
+                    print(msg)
+
+                    # TensorBoard(옵션)
+                    writer.add_scalar('time/data_ms', data_ms, global_micro)
+                    writer.add_scalar('time/h2d_ms', t_h2d.ms, global_micro)
+                    writer.add_scalar('time/encode_ms', t_enc.ms, global_micro)
+                    writer.add_scalar('time/forward_ms', t_fwd.ms, global_micro)
+                    writer.add_scalar('time/loss_ms', t_loss.ms, global_micro)
+                    writer.add_scalar('time/backward_ms', t_bwd.ms, global_micro)
+                    writer.add_scalar('time/optim_ms', t_opt.ms, global_micro)
+                    writer.add_scalar('time/step_total_ms', t_step_total.ms, global_micro)
+
+            # 시나리오 단위 로그 (원래 있던 출력 유지)
+            print(f"[{epoch} / {len(train_loader)}]  || Scenario {scenario_id_check} for {record_len} ticks | Loss : {final_loss:.4f}")
+
+            if opt.rank == 0:
+                criterion.logging(epoch, i, scenario_id_check, len(train_loader), writer, pbar=pbar2, rank=opt.rank)
+                pbar2.update(1)
+                for lr_idx, param_group in enumerate(optimizer.param_groups):
+                    writer.add_scalar(f'lr_{lr_idx}', param_group["lr"], global_micro)
+
+        # ── 에폭 말: 요약 통계 출력
+        if opt.rank == 0:
+            print("\n=== Epoch Profiling Summary (ms) ===")
+            print(epoch_prof.pretty())
+            # 원한다면 요약도 TensorBoard에 기록
+            summ = epoch_prof.summary()
+            for k, st in summ.items():
+                writer.add_scalar(f'epoch_time/{k}_mean_ms', st['mean'], epoch)
+                writer.add_scalar(f'epoch_time/{k}_p50_ms',  st['p50'],  epoch)
+                writer.add_scalar(f'epoch_time/{k}_max_ms',  st['max'],  epoch)
 
         """
         현재는 Distributed Sampler를 통해 각 rank에 tick chunks를 나누어서 gpu에 할당해주었음

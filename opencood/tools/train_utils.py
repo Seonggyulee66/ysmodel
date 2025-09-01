@@ -13,6 +13,11 @@ import torch.optim as optim
 import torch.distributed as dist
 import numpy as np
 from timm.scheduler.cosine_lr import CosineLRScheduler
+from torch.optim.lr_scheduler import (
+    StepLR, MultiStepLR, ExponentialLR,
+    OneCycleLR, CosineAnnealingWarmRestarts, LambdaLR
+)
+from timm.scheduler.cosine_lr import CosineLRScheduler
 
 from opencood.tools.multi_gpu_utils import get_dist_info
 from opencood.utils.common_utils import torch_tensor_to_numpy
@@ -102,37 +107,67 @@ def setup_train(hypes):
 def create_model(hypes):
     """
     Import the module "models/[model_name].py
-
-    Parameters
-    __________
-    hypes : dict
-        Dictionary containing parameters.
-
-    Returns
-    -------
-    model : opencood,object
-        Model object.
     """
-    backbone_name = hypes['model']['core_method']
-    backbone_config = hypes['model']['args']
+    # 안전장치: 멀티프로세스 __pycache__ 레이스 회피
+    os.environ.setdefault("PYTHONDONTWRITEBYTECODE", "1")
+    importlib.invalidate_caches()
 
-    model_filename = "opencood.models." + backbone_name
-    model_lib = importlib.import_module(model_filename)
+    backbone_name   = hypes['model']['core_method']
+    backbone_config = hypes['model']['args']
+    model_filename  = "opencood.models." + backbone_name
+
+    # rank 파악
+    try:
+        rank = dist.get_rank() if dist.is_available() and dist.is_initialized() else int(os.environ.get("RANK", "0"))
+    except Exception:
+        rank = int(os.environ.get("RANK", "0"))
+
+    def _safe_import(name):
+        try:
+            return importlib.import_module(name)
+        except Exception as e:
+            spec   = importlib.util.find_spec(name)
+            origin = getattr(spec, "origin", None)
+            print(f"[IMPORT-DEBUG][rank={rank}] name={name} origin={origin} err={repr(e)}", file=sys.stderr, flush=True)
+            # 오염 quick check (rank0만)
+            if origin and rank == 0:
+                try:
+                    with open(origin, "rb") as f:
+                        data = f.read(256*1024)  # 처음 256KB만 체크해도 충분
+                    if b"\x00" in data:
+                        print(f"[IMPORT-DEBUG] NUL(\\x00) bytes detected in {origin}", file=sys.stderr, flush=True)
+                except Exception as ee:
+                    print(f"[IMPORT-DEBUG] failed to read {origin}: {ee}", file=sys.stderr, flush=True)
+            raise
+
+    # rank0 선임포트 → barrier → 나머지 임포트 (레이스 방지)
+    if dist.is_available() and dist.is_initialized():
+        if rank == 0:
+            model_lib = _safe_import(model_filename)
+        if dist.get_world_size() > 1:
+            dist.barrier()
+        if rank != 0:
+            model_lib = _safe_import(model_filename)
+    else:
+        model_lib = _safe_import(model_filename)
+
+    # 클래스 찾기
     model = None
     target_model_name = backbone_name.replace('_', '')
-    
     for name, cls in model_lib.__dict__.items():
         if name.lower() == target_model_name.lower():
             model = cls
+            break
 
     if model is None:
         print('backbone not found in models folder. Please make sure you '
-              'have a python file named %s and has a class '
-              'called %s ignoring upper/lower case' % (model_filename,
-                                                       target_model_name))
-        exit(0)
+              'have a python file named %s and has a class called %s (case-insensitive)'
+              % (model_filename, target_model_name))
+        sys.exit(1)
+
     instance = model(backbone_config)
     return instance
+
 
 
 def create_loss(hypes):

@@ -49,233 +49,199 @@ def dilate_label_tensor(label_tensor, kernel_size=3, iterations=1):
 #     plt.savefig(f"dialated_fig/4_dilated_label_debug.png")
 #     plt.close()
     
+# ---------- VanillaSegLoss (Tversky + Focal만) ----------
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
 
-# ---------- Tversky (binary) ----------
-def tversky_binary_from_probs(p_fg, t_fg, alpha=0.3, beta=0.7, eps=1e-6):
-    """
-    p_fg, t_fg: [B,1,H,W], p_fg는 sigmoid 확률(0~1), t_fg는 {0,1}
-    반환: (1 - Tversky) 의 배치 평균 = loss
-    """
-    p = p_fg.clamp(eps, 1 - eps)
-    t = t_fg.float()
-    tp = (p * t).sum(dim=(2,3))
-    fp = (p * (1 - t)).sum(dim=(2,3))
-    fn = ((1 - p) * t).sum(dim=(2,3))
-    tversky = (tp + eps) / (tp + alpha * fp + beta * fn + eps)
-    return 1.0 - tversky.mean()
-
-# ---------- Tversky (multiclass) ----------
-def tversky_multiclass_from_probs(p, t, alpha=0.3, beta=0.7, eps=1e-6, ignore_index=None):
-    """
-    p: [B,C,H,W] softmax 확률, t: [B,H,W] long
-    반환: (1 - per-class tversky).mean() = loss
-    """
-    B, C, H, W = p.shape
-    p = p.clamp(eps, 1 - eps)
-    t_oh = F.one_hot(t.clamp_min(0), num_classes=C).permute(0,3,1,2).float()
-
-    if ignore_index is not None:
-        mask = (t != ignore_index).float().unsqueeze(1)  # [B,1,H,W]
-        p = p * mask
-        t_oh = t_oh * mask
-
-    tp = (p * t_oh).sum(dim=(0,2,3))      # per-class
-    fp = (p * (1 - t_oh)).sum(dim=(0,2,3))
-    fn = ((1 - p) * t_oh).sum(dim=(0,2,3))
-    tversky = (tp + eps) / (tp + alpha * fp + beta * fn + eps)  # (C,)
-    return 1.0 - tversky.mean()
-
-# ---------- Focal (binary) ----------
-def focal_binary_with_logits(logits, targets, gamma=2.0, alpha=0.25, weight=None, eps=1e-8):
-    bce = F.binary_cross_entropy_with_logits(logits, targets, reduction='none')
-    probas = torch.sigmoid(logits)
-    pt = torch.where(targets == 1, probas, 1 - probas)
-    focal = (alpha * (1 - pt) ** gamma) * bce
-
-    if weight is not None:
-        focal = focal * weight  # 여기서 weight_map 곱해줌
-
-    return focal.mean()
-# ---------- Focal (multiclass) ----------
-def focal_multiclass_with_logits(logits, target, gamma=1.0, class_weight=None, ignore_index=None):
-    """
-    logits: [B,C,H,W], target: [B,H,W] (long)
-    CE 기반 FocalLoss: FL = (1 - p_t)^gamma * CE
-    """
-    log_p = F.log_softmax(logits, dim=1)           # [B,C,H,W]
-    p = log_p.exp()
-
-    if ignore_index is not None:
-        valid = (target != ignore_index)
-        target = target.clone()
-        target[~valid] = 0  # 임시 값
-    else:
-        valid = torch.ones_like(target, dtype=torch.bool)
-
-    pt = p.gather(1, target.unsqueeze(1)).squeeze(1)       # [B,H,W]
-    ce = F.nll_loss(
-        log_p, target,
-        weight=class_weight,
-        ignore_index=ignore_index if ignore_index is not None else -1000,  # 무시 안 할 때 영향 없도록
-        reduction="none"
-    )  # [B,H,W]
-
-    fl = (1 - pt).pow(gamma) * ce
-    fl = fl[valid].mean() if valid.any() else ce.mean()
-    return fl
-
-# ---------- VanillaSegLoss (Tversky + Focal만) ----------
 class VanillaSegLoss(nn.Module):
     def __init__(self, args):
         super().__init__()
-        self.d_weights = args['d_weights']
-        self.s_weights = args['s_weights']
-        self.l_weights = 50 if 'l_weights' not in args else args['l_weights']
+        # ----- weights / coeffs -----
+        self.d_weights = float(args['d_weights'])
+        self.s_weights = float(args['s_weights'])
+        self.l_weights = 50 if 'l_weights' not in args else float(args['l_weights'])
 
-        self.d_coe = args['d_coe']
-        self.s_coe = args['s_coe']
-        self.p_coe = args['p_coe']
-        self.o_coe = args['o_coe']
+        self.d_coe = float(args['d_coe'])
+        self.s_coe = float(args['s_coe'])
+        self.p_coe = float(args['p_coe'])
+        self.o_coe = float(args['o_coe'])
 
         self.target = args['target']
 
-        # 조합 비율
-        self.lambda_tversky = args.get('lambda_tversky', 0.6)
-        self.lambda_focal   = args.get('lambda_focal',   0.4)
+        # ----- CE options -----
+        self.ignore_index = int(args.get('ignore_index', 255))
+        self.ce_ohem_pct = args.get('ce_ohem_pct', None)           # 0.2 -> 상위 20%만 평균
+        self.ce_label_smoothing = float(args.get('ce_label_smoothing', 0.0))
+        self.ce_temperature = float(args.get('ce_temperature', 1.5))# 로짓 온도(과신 억제)
+        self.ce_cap = float(args.get('ce_cap', 20.0))              # 픽셀당 손실 상한
 
-        # Tversky (리콜↑이면 beta↑)
-        self.tversky_alpha = args.get('tversky_alpha', 0.3)
-        self.tversky_beta  = args.get('tversky_beta',  0.75)   # <- 0.7 -> 0.75로 미세 상향 권장
-        self.tversky_eps   = args.get('tversky_eps',   1e-6)   # 안정화용
+        # calibration (dynamic에만 사용)
+        self.calib_lambda = float(args.get('calib_lambda', 0.0))
+        self.prior_fg     = float(args.get('prior_fg', 0.015))
 
-        # Focal (under-confidence 완화)
-        self.focal_gamma_bin = args.get('focal_gamma_bin', 1.5)   # <- 2.0 에서 1.5로 완화
-        self.focal_alpha_bin = args.get('focal_alpha_bin', None)  # <- 동적 alpha를 쓸 것이므로 기본 None
-        self.focal_gamma_mc  = args.get('focal_gamma_mc',  1.0)
-
-        # Effective number weight (binary에 적용)
-        self.use_effective_num = args.get('use_effective_num', True)
-        self.en_beta = args.get('effective_num_beta', 0.9999)
-
-        # static class weight / ignore
-        self.ignore_index = args.get('ignore_index', None)
+        # static 3-class 가중치 (bg=1, small=s_w, large=l_w)
         s_w = float(args.get('s_weights', 30.0))
         l_w = float(args.get('l_weights', 50.0))
-        self.register_buffer('static_class_weight',
-            torch.tensor([1.0, s_w, l_w], dtype=torch.float32))
+        self.register_buffer(
+            'static_class_weight',
+            torch.tensor([1.0, s_w, l_w], dtype=torch.float32)
+        )
 
         self.loss_dict = {}
 
     @staticmethod
-    def _effective_num_weights(pos_count, neg_count, beta=0.9999, eps=1e-8, device='cpu'):
-        # pos/neg 개수에서 effective number 기반 w_pos, w_neg 산출
-        # w = (1 - beta) / (1 - beta^n)
-        n_pos = torch.as_tensor(pos_count, dtype=torch.float32, device=device).clamp_min(1.0)
-        n_neg = torch.as_tensor(neg_count, dtype=torch.float32, device=device).clamp_min(1.0)
-        en_pos = (1.0 - beta**n_pos).clamp_min(eps)
-        en_neg = (1.0 - beta**n_neg).clamp_min(eps)
-        w_pos = (1.0 - beta) / en_pos
-        w_neg = (1.0 - beta) / en_neg
-        # 정규화(평균=1 근처)
-        m = 0.5 * (w_pos + w_neg)
-        return (w_pos / m).detach(), (w_neg / m).detach()
+    def _sanitize_target(target: torch.Tensor, C: int, ignore_index: int):
+        """
+        - long dtype 보장
+        - [0, C-1] 범위를 벗어난 값은 전부 ignore_index로 치환
+        - NaN/Inf 방지
+        """
+        t = torch.nan_to_num(target).long()
+        invalid = (t < 0) | (t >= C)
+        if invalid.any():
+            t = t.clone()
+            t[invalid] = ignore_index
+        return t
+
+    # --- (선택) 클래스 가중치 길이 보정 ---
+    @staticmethod
+    def _fix_class_weights(class_weights, C: int, device):
+        if class_weights is None:
+            return None
+        cw = class_weights.to(device=device, dtype=torch.float32)
+        if cw.numel() == C:
+            return cw
+        # 길이 안 맞으면 앞에서 채우고, 모자라면 1.0으로 패딩
+        w = torch.ones(C, dtype=torch.float32, device=device)
+        n = min(C, cw.numel())
+        if n > 0:
+            w[:n] = cw[:n]
+        return w
+
+    def _stable_ce(self, logits, target, class_weights=None,
+                   temperature=1.5, label_smoothing=0.0,
+                   ohem_pct=None, ignore_index=255, cap=20.0):
+
+        # ---- 준비: C/타깃 살균/웨이트 보정 ----
+        assert logits.dim() == 4, f"expected [N,C,H,W], got {list(logits.shape)}"
+        N, C, H, W = logits.shape
+        target = self._sanitize_target(target, C=C, ignore_index=ignore_index).contiguous()
+        w = self._fix_class_weights(class_weights, C=C, device=logits.device)
+
+        valid = (target != ignore_index)
+
+        # ---- FP32 계산 + temperature ----
+        with torch.cuda.amp.autocast(enabled=False):
+            lg = (logits.float() / max(1e-6, float(temperature))).contiguous()
+            ce_map = F.cross_entropy(
+                lg, target,
+                weight=w, ignore_index=ignore_index,
+                reduction='none',
+                label_smoothing=float(label_smoothing)
+            )  # [N,H,W] (float32)
+
+        # ---- per-pixel cap & OHEM ----
+        ce_valid = torch.clamp(ce_map, max=float(cap))[valid]  # <-- 에러 라인 교체
+        if ohem_pct is not None:
+            k = max(1, int(float(ohem_pct) * ce_valid.numel()))
+            ce_valid, _ = torch.topk(ce_valid, k, sorted=False)
+        return ce_valid.mean() if ce_valid.numel() > 0 else ce_map.new_tensor(0.0)
+
+    # (BCE 경로는 이전 버전 그대로면 OK)
 
     def forward(self, output_dict, gt_dict):
         device = self.static_class_weight.device
-
         static_loss  = torch.zeros((), device=device)
         dynamic_loss = torch.zeros((), device=device)
 
-        # ---------- Dynamic (binary) ----------
+        # ----- Dynamic -----
         if self.target in ('dynamic', 'both'):
-            dynamic_pred = output_dict['dynamic_seg']        # [B,L,2,H,W]
+            dynamic_pred = output_dict['dynamic_seg']        # [B,L,Cd,H,W]
             dynamic_gt   = gt_dict['gt_dynamic']             # [B,L,H,W]
+            dyn_logits = rearrange(dynamic_pred, 'b l c h w -> (b l) c h w').contiguous()
+            dyn_target = rearrange(dynamic_gt,  'b l h w -> (b l) h w').contiguous()
+            Cd = dyn_logits.shape[1]
 
-            dyn_logits = rearrange(dynamic_pred, 'b l c h w -> (b l) c h w')
-            dyn_target = rearrange(dynamic_gt,  'b l h w -> (b l) h w').long()
-
-            # FG logit/prob
-            dyn_logit_fg = dyn_logits[:, 1:2]                     # [BL,1,H,W]
-            dyn_prob_fg  = torch.sigmoid(dyn_logit_fg)            # [BL,1,H,W]
-            dyn_target_fg = (dyn_target == 1).unsqueeze(1).float()
-
-            # ---- 동적 alpha (배치 FG 비율 기반) ----
-            # p_fg = (#FG pixel) / (#valid pixel)
-            valid = torch.ones_like(dyn_target_fg, dtype=torch.bool, device=dyn_target_fg.device)
-            fg_count = dyn_target_fg.sum()
-            total_count = valid.sum().clamp_min(1)
-            p_fg = (fg_count.float() / total_count.float()).clamp(0.0001, 0.9999)
-            # focal alpha는 양성 가중; 희소 FG면 alpha를 크게 -> alpha = 1 - p_fg가 자연스러움
-            dyn_alpha = 1.0 - p_fg.item() if self.focal_alpha_bin is None else float(self.focal_alpha_bin)
-
-            # ---- effective number class weight (선택) ----
-            if self.use_effective_num:
-                w_pos, w_neg = self._effective_num_weights(
-                    pos_count=fg_count.item(),
-                    neg_count=(total_count - fg_count).item(),
-                    beta=self.en_beta,
-                    device=dyn_target_fg.device
+            if Cd == 2:
+                class_weights = torch.tensor([1.0, self.d_weights], dtype=torch.float32, device=dyn_logits.device)
+                dynamic_loss = self._stable_ce(
+                    dyn_logits, dyn_target,
+                    class_weights=class_weights,
+                    temperature=self.ce_temperature,
+                    label_smoothing=self.ce_label_smoothing,
+                    ohem_pct=self.ce_ohem_pct,
+                    ignore_index=self.ignore_index,
+                    cap=self.ce_cap
                 )
-                # per-pixel weight map: FG에 w_pos, BG에 w_neg 적용
-                weight_map = torch.where(dyn_target_fg.bool(), w_pos, w_neg)
+            elif Cd == 1:
+                # (필요 시 _stable_bce 사용)
+                pos_w = torch.tensor([self.d_weights], dtype=torch.float32, device=dyn_logits.device)
+                dynamic_loss = self._stable_bce(
+                    dyn_logits, dyn_target,
+                    pos_weight=pos_w,
+                    temperature=self.ce_temperature,
+                    ohem_pct=self.ce_ohem_pct,
+                    ignore_index=self.ignore_index,
+                    cap=self.ce_cap
+                )
             else:
-                weight_map = None
+                # 예외 케이스: Cd>2면 균등 가중치로 CE
+                w_dyn = torch.ones(Cd, dtype=torch.float32, device=dyn_logits.device)
+                dynamic_loss = self._stable_ce(
+                    dyn_logits, dyn_target,
+                    class_weights=w_dyn,
+                    temperature=self.ce_temperature,
+                    label_smoothing=self.ce_label_smoothing,
+                    ohem_pct=self.ce_ohem_pct,
+                    ignore_index=self.ignore_index,
+                    cap=self.ce_cap
+                )
 
-            # ---- Tversky + Focal (binary) ----
-            # Tversky (from probs)
-            dyn_tv = tversky_binary_from_probs(
-                dyn_prob_fg.clamp(self.tversky_eps, 1 - self.tversky_eps),
-                dyn_target_fg,
-                alpha=self.tversky_alpha,
-                beta=self.tversky_beta
-            )
-            # Focal (with logits) + 동적 alpha + (선택)weight_map
-            dyn_fl = focal_binary_with_logits(
-                dyn_logit_fg,
-                dyn_target_fg,
-                gamma=self.focal_gamma_bin,
-                alpha=dyn_alpha,
-                weight=weight_map    # <- 구현체가 weight 인자를 지원하면 연결, 아니면 내부 곱 처리
-            )
-            dynamic_loss = self.lambda_tversky * dyn_tv + self.lambda_focal * dyn_fl
+            # calibration (optional)
+            if self.calib_lambda > 0:
+                with torch.no_grad():
+                    valid = (self._sanitize_target(dyn_target, Cd, self.ignore_index) != self.ignore_index)
+                p = (torch.softmax(dyn_logits, dim=1)[:, 1] if Cd >= 2
+                     else torch.sigmoid(dyn_logits[:, 0]))
+                p_valid = p[valid]
+                if p_valid.numel() > 0:
+                    prior = torch.as_tensor(self.prior_fg, device=p_valid.device, dtype=p_valid.dtype)
+                    dynamic_loss = dynamic_loss + self.calib_lambda * (p_valid.mean() - prior).pow(2)
 
-        # ---------- Static (multiclass) ----------
+        # ----- Static -----
         if self.target in ('static', 'both'):
-            static_pred = output_dict['static_seg']          # [B,L,3,H,W]
+            static_pred = output_dict['static_seg']          # [B,L,Cs,H,W]
             static_gt   = gt_dict['gt_static']               # [B,L,H,W]
+            sta_logits = rearrange(static_pred, 'b l c h w -> (b l) c h w').contiguous()
+            sta_target = rearrange(static_gt,  'b l h w -> (b l) h w').contiguous()
+            Cs = sta_logits.shape[1]
 
-            sta_logits = rearrange(static_pred, 'b l c h w -> (b l) c h w')  # [BL,3,H,W]
-            sta_target = rearrange(static_gt,  'b l h w -> (b l) h w').long()
+            # 현재 Cs에 맞게 weight 생성/보정
+            base_w = torch.tensor([1.0, self.s_weights, self.l_weights], dtype=torch.float32, device=sta_logits.device)
+            w_static = self._fix_class_weights(base_w, C=Cs, device=sta_logits.device)
 
-            sta_prob = F.softmax(sta_logits, dim=1).clamp(self.tversky_eps, 1 - self.tversky_eps)
-            sta_tv = tversky_multiclass_from_probs(
-                sta_prob, sta_target,
-                alpha=self.tversky_alpha, beta=self.tversky_beta,
-                ignore_index=self.ignore_index, eps=self.tversky_eps
-            )
-            sta_fl = focal_multiclass_with_logits(
+            static_loss = self._stable_ce(
                 sta_logits, sta_target,
-                gamma=self.focal_gamma_mc,
-                class_weight=self.static_class_weight.to(sta_logits.device),
-                ignore_index=self.ignore_index
+                class_weights=w_static,
+                temperature=self.ce_temperature,
+                label_smoothing=self.ce_label_smoothing,
+                ohem_pct=self.ce_ohem_pct,   # 원하면 static엔 None도 가능
+                ignore_index=self.ignore_index,
+                cap=self.ce_cap
             )
-            static_loss = self.lambda_tversky * sta_tv + self.lambda_focal * sta_fl
 
-        # ---------- Aux losses (안전 대체) ----------
+        # ----- Aux & total -----
         pos_loss = output_dict.get('pos_loss', [torch.zeros((), device=device)])[0]
-        if isinstance(pos_loss, (list, tuple)):
-            pos_loss = pos_loss[0]
+        if isinstance(pos_loss, (list, tuple)): pos_loss = pos_loss[0]
         offsets = output_dict.get('offsets', [[torch.zeros((), device=device)]])[0]
-        off_loss = torch.stack([o.abs().mean() if o.numel() > 0 else torch.zeros((), device=device)
-                                for o in offsets]).mean() if isinstance(offsets, (list, tuple)) else torch.zeros((), device=device)
+        off_loss = (torch.stack([o.abs().mean() if (torch.is_tensor(o) and o.numel() > 0)
+                                 else torch.zeros((), device=device) for o in offsets]).mean()
+                    if isinstance(offsets, (list, tuple)) else torch.zeros((), device=device))
 
         total_loss = self.s_coe * static_loss + self.d_coe * dynamic_loss + self.p_coe * pos_loss + self.o_coe * off_loss
 
-        # 로깅용 (detach)
         self.loss_dict.update({
             'total_loss': total_loss.detach(),
             'static_loss': static_loss.detach(),
@@ -320,14 +286,11 @@ class VanillaSegLoss(nn.Module):
 
 
             writer.add_scalar('Static_loss', static_loss.item(),
-                            epoch*batch_len + batch_id)
+                            epoch)
             writer.add_scalar('Dynamic_loss', dynamic_loss.item(),
-                            epoch*batch_len + batch_id)
+                            epoch)
             writer.add_scalar('Position_loss', pos_loss.item(),
-                            epoch*batch_len + batch_id)
+                            epoch)
             writer.add_scalar('Offset_loss', offset_loss.item(),
-                            epoch*batch_len + batch_id)
-
-
-
+                            epoch)
 

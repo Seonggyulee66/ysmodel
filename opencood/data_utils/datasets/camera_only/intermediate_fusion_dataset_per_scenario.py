@@ -18,59 +18,102 @@ class CamIntermediateFusionDataset_per_scenario(base_camera_dataset.BaseCameraDa
                                                            validate)
         self.visible = params['train_params']['visible']
         self.chunk_index_list = self.build_chunk_index()
-    
+
     ## 이전과는 다르게 scenario별로 처리하기위해 이전의 tick 기준 __len__을 override
     def __len__(self):
-        return len(self.chunk_index_list)   # 기대: 12
+        return len(self.chunk_index_list)
 
-        
     def build_chunk_index(self):
         chunk_index_list = []
-        scenario_ids = self.params['train_params'].get('debug_scenario_ids', None)
-        tick_range   = self.params['train_params'].get('debug_tick_range', None)  # e.g. (0, 20)
-        max_tick     = self.params['train_params'].get('max_tick_per_scenario', None)
 
         for scenario_id in self.scenario_idx_list:
-            if scenario_ids and scenario_id not in scenario_ids:
-                continue
+            timestamps = self.get_tick_indices_for_scenario(scenario_id)
 
-            # "고정 순서"의 타임스탬프 키 목록(리스트) 확보
-            ts_keys = list(self.get_tick_indices_for_scenario(scenario_id))
-
-            # 범위/최대틱 적용은 '포지션' 기준으로
-            if tick_range:
-                s, e = tick_range; ts_keys = ts_keys[s:e]
-            elif max_tick:
-                ts_keys = ts_keys[:max_tick]
-
-            T = len(ts_keys)
-            for i in range(0, T, self.chunk_size):           # self.chunk_size=5
-                j = min(i + self.chunk_size, T)
-                pos_list = list(range(i, j))                 # ← 정수 포지션
+            for i in range(0, len(timestamps), self.chunk_size):
                 chunk_index_list.append({
                     'scenario_id': scenario_id,
-                    'pos_list': pos_list,                    # ex) [0,1,2,3,4], [5..9], ...
-                    'chunk_id': i // self.chunk_size,
-                    'T_total': T
+                    'start_tick': i,
+                    'end_tick': min(i + self.chunk_size, len(timestamps))
                 })
+
         return chunk_index_list
 
     def __getitem__(self, idx):
-        chunk = self.chunk_index_list[idx]
-        scenario_id = chunk['scenario_id']
-        pos_list    = chunk['pos_list']
-
-        # 디버그: 실제 키 찍어보기(정합 확인용)
-        ts_keys = list(self.get_tick_indices_for_scenario(scenario_id))
-        dbg_keys = [ts_keys[p] for p in pos_list]
-        print(f"[Debug] scn={scenario_id} chunk={chunk['chunk_id']} pos={pos_list} ticks={dbg_keys}")
+        chunk_info = self.chunk_index_list[idx]
+        scenario_id = chunk_info['scenario_id']
+        tick_range = range(chunk_info['start_tick'], chunk_info['end_tick'])
 
         scenario_data = []
-        for pos in pos_list:
-            data_sample = self.get_sample_random((scenario_id, pos))  # ← 정수 인덱스만!
-            processed   = self.process_single_tick(data_sample)
-            scenario_data.append(processed)
+        for tick_idx in tick_range:
+            # 기존 get_sample_random() 호출
+            data_sample = self.get_sample_random((scenario_id, tick_idx))
+            processed_tick = self.process_single_tick(data_sample)
+            scenario_data.append(processed_tick)
+
         return scenario_data
+# ###################################################### small Scenario Check
+# class CamIntermediateFusionDataset_per_scenario(base_camera_dataset.BaseCameraDataset):
+#     def __init__(self, params, visualize, train=True, validate=False):
+#         super(CamIntermediateFusionDataset_per_scenario, self).__init__(params,
+#                                                            visualize,
+#                                                            train,
+#                                                            validate)
+#         self.visible = params['train_params']['visible']
+#         self.chunk_index_list = self.build_chunk_index()
+    
+#     ## 이전과는 다르게 scenario별로 처리하기위해 이전의 tick 기준 __len__을 override
+#     def __len__(self):
+#         return len(self.chunk_index_list)   # 기대: 12
+
+        
+#     def build_chunk_index(self):
+#         chunk_index_list = []
+#         scenario_ids = self.params['train_params'].get('debug_scenario_ids', None)
+#         tick_range   = self.params['train_params'].get('debug_tick_range', None)  # e.g. (0, 20)
+#         max_tick     = self.params['train_params'].get('max_tick_per_scenario', None)
+
+#         for scenario_id in self.scenario_idx_list:
+#             if scenario_ids and scenario_id not in scenario_ids:
+#                 continue
+
+#             # "고정 순서"의 타임스탬프 키 목록(리스트) 확보
+#             ts_keys = list(self.get_tick_indices_for_scenario(scenario_id))
+
+#             # 범위/최대틱 적용은 '포지션' 기준으로
+#             if tick_range:
+#                 s, e = tick_range; ts_keys = ts_keys[s:e]
+#             elif max_tick:
+#                 ts_keys = ts_keys[:max_tick]
+
+#             T = len(ts_keys)
+#             for i in range(0, T, self.chunk_size):           # self.chunk_size=5
+#                 j = min(i + self.chunk_size, T)
+#                 pos_list = list(range(i, j))                 # ← 정수 포지션
+#                 chunk_index_list.append({
+#                     'scenario_id': scenario_id,
+#                     'pos_list': pos_list,                    # ex) [0,1,2,3,4], [5..9], ...
+#                     'chunk_id': i // self.chunk_size,
+#                     'T_total': T
+#                 })
+#         return chunk_index_list
+
+#     def __getitem__(self, idx):
+#         chunk = self.chunk_index_list[idx]
+#         scenario_id = chunk['scenario_id']
+#         pos_list    = chunk['pos_list']
+
+#         # 디버그: 실제 키 찍어보기(정합 확인용)
+#         ts_keys = list(self.get_tick_indices_for_scenario(scenario_id))
+#         dbg_keys = [ts_keys[p] for p in pos_list]
+#         print(f"[Debug] scn={scenario_id} chunk={chunk['chunk_id']} pos={pos_list} ticks={dbg_keys}")
+
+#         scenario_data = []
+#         for pos in pos_list:
+#             data_sample = self.get_sample_random((scenario_id, pos))  # ← 정수 인덱스만!
+#             processed   = self.process_single_tick(data_sample)
+#             scenario_data.append(processed)
+#         return scenario_data
+
 
     def process_single_tick(self,data_sample):
         cav_list = list(data_sample.keys())

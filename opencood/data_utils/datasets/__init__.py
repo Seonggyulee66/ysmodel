@@ -8,7 +8,7 @@ __all__ = {
     'CamLateFusionDataset': CamLateFusionDataset,
     'CamIntermediateFusionDataset': CamIntermediateFusionDataset,
     'IntermediateFusionDatasetV2' : IntermediateFusionDatasetV2,
-    'CamIntermediateFusionDataset_per_scenario' : CamIntermediateFusionDataset_per_scenario
+    'CamIntermediateFusionDataset_per_scenario' : CamIntermediateFusionDataset_per_scenario,
 }
 
 # the final range for evaluation
