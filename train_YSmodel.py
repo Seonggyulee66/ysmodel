@@ -8,6 +8,10 @@ from torch.utils.data import DataLoader
 from tensorboardX import SummaryWriter
 from torch.utils.data import DataLoader, DistributedSampler
 # from torch.utils.data import SequentialSampler
+import math
+from collections import deque
+
+import torch.distributed as dist
 
 
 import opencood.hypes_yaml.yaml_utils as yaml_utils
@@ -111,6 +115,9 @@ def main():
     hypes = yaml_utils.load_yaml(opt.hypes_yaml, opt)
 
     multi_gpu_utils.init_distributed_mode(opt)
+    
+    if getattr(opt, "distributed", False):
+        torch.cuda.set_device(opt.gpu)
 
     print('-----------------Seed Setting----------------------')
     seed = train_utils.init_random_seed(None if opt.seed == 0 else opt.seed)
@@ -322,14 +329,11 @@ def main():
     ######################################################################################################################
     # ─────────────────────────────────────────────────────────────────────────────
 # 에폭 밖(루프 시작 전) 권장: 운영 임곗값 초기화
-    try:
-        th_run
-    except NameError:
-        th_run = 0.02  # 초기 운영 임곗값 (prior-matching)
-    best_F1_ema = 0.0
-
-    eval_freq = hypes['train_params'].get('eval_freq', 50)  # YAML에서 가져옴
-    PRINT_DELTA = 1e-3  # F1이 이 이상 개선될 때도 프린트
+    # 에폭 시작하기 전에 1회
+    th_run = 0.02                     # prior 기반 초기값
+    prev_F1_run  = None
+    best_th_hist = deque(maxlen=15)   # 최근 best_th 추적
+    th_frozen    = False              # 안정화되면 고정
     # ─────────────────────────────────────────────────────────────────────────────
 
     for epoch in range(init_epoch, max(epoches, init_epoch)):
@@ -465,8 +469,8 @@ def main():
             for lr_idx, param_group in enumerate(optimizer.param_groups):
                 writer.add_scalar(f'lr_{lr_idx}', param_group["lr"], global_micro)
 
-        # ─────────────────────────────
-        # ★ 변경: 에폭 말에만 스윕/운영 임곗값/요약 지표 프린트
+        # ─────────────────────────────────────────────────────────────
+         # ★ 변경: 에폭 말에만 스윕/운영 임곗값/요약 지표 프린트
         with torch.no_grad():
             if len(epoch_logits) > 0:
                 all_logits  = torch.cat(epoch_logits,  0)  # (N, C, H, W)
@@ -495,26 +499,7 @@ def main():
                     writer.add_scalar('y_prev', run_metrics['y_prev'], epoch)
                     writer.add_scalar('p_mean_run', run_metrics['p_mean'], epoch)
 
-                    # “reasonable한 때”만 프린트
-                    should_print = (
-                        epoch == init_epoch or
-                        epoch == max(epoches, init_epoch) - 1 or
-                        ((epoch + 1) % eval_freq == 0) or
-                        (best['F1'] > best_F1_ema + PRINT_DELTA)
-                    )
-                    if should_print:
-                        print(
-                            f"[E{epoch}] "
-                            f"th*={th_run:.3f} (best {best['th']:.3f}) | "
-                            f"F1*={F1_run:.3f} P*={run_metrics['P']:.3f} R*={run_metrics['R']:.3f} | "
-                            f"PPR*={run_metrics['PPR']:.3f} p_mean*={run_metrics['p_mean']:.3f} "
-                            f"y_prev={run_metrics['y_prev']:.3f} || "
-                            f"[best] F1={best['F1']:.3f} P={best['P']:.3f} R={best['R']:.3f} PPR={best['PPR']:.3f}"
-                        )
-                    # F1 ema 갱신
-                    best_F1_ema = 0.9 * best_F1_ema + 0.1 * best['F1']
-
-        """
+        """        
         현재는 Distributed Sampler를 통해 각 rank에 tick chunks를 나누어서 gpu에 할당해주었음
         Visualization save시 현재는 각 gpu rank가 같은 함수에 접근하여 모든 rank가 같은 파일 이름으로 저장하여
         현 시나리오의 모든 tick을 저장하는것이 아닌 tick의 일부만 저장함. 만약 모든 ticks를 visualization 하고 싶으면
@@ -647,10 +632,10 @@ def main():
         #     writer.add_scalar('Road_IoU', static_ave_iou, epoch)
         #         # writer.add_scalar('Lane_IoU', static_ave_iou, epoch)
 
-        # if epoch % hypes['train_params']['save_freq'] == 0:
-        #     torch.save(model_without_ddp.state_dict(),
-        #                os.path.join(saved_path,
-        #                             'net_epoch%d.pth' % (epoch + 1)))
+        if epoch % hypes['train_params']['save_freq'] == 0:
+            torch.save(model_without_ddp.state_dict(),
+                       os.path.join(saved_path,
+                                    'net_epoch%d.pth' % (epoch + 1)))
 
         # opencood_train_dataset.reinitialize()         ## cav 순서가 바뀌어 ego가 바뀌는 상황이 없으므로 reinitialize해줄 필요없음
 

@@ -233,6 +233,7 @@ class VanillaSegLoss(nn.Module):
             )
 
         # ----- Aux & total -----
+        ## position uncertainty 추가 예정
         pos_loss = output_dict.get('pos_loss', [torch.zeros((), device=device)])[0]
         if isinstance(pos_loss, (list, tuple)): pos_loss = pos_loss[0]
         offsets = output_dict.get('offsets', [[torch.zeros((), device=device)]])[0]
